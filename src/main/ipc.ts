@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { scope } from './logger.js'
 import { IPC } from '@shared/ipc.js'
+import { MIN_SEGMENT_SEC } from '@shared/cut.js'
 import {
   ALLOWED_FPS,
   BUFFER_DURATION_MAX,
@@ -20,7 +21,7 @@ import {
 } from '@shared/constants.js'
 import { getSetting, setSetting } from './store.js'
 import { hotkeyTitle } from './hotkey.js'
-import { getClipMeta, getScreenshotMeta, setScreenshotMeta, deleteScreenshotMeta } from './clip-meta.js'
+import { getClipMeta, setClipMeta, getScreenshotMeta, setScreenshotMeta, deleteScreenshotMeta } from './clip-meta.js'
 import { captureScreenshot } from './ffmpeg.js'
 import { isInside, isWritable, nonEmptyString } from './util.js'
 import type { Profile } from '@shared/types.js'
@@ -1890,17 +1891,15 @@ const isBufferDuration = (v: unknown): v is number =>
 
 function isSaveClipArgs(v: unknown): v is {
   clipPath: string
-  startSec: number
-  endSec: number
+  items: { id: number; kind: 'keep'; srcIn: number; srcOut: number }[] | { id: number; kind: 'gap'; durSec: number }[]
   mode: 'overwrite' | 'copy'
   trackVolumes?: { stream: number; volume: number }[]
 } {
   if (!v || typeof v !== 'object') return false
   const a = v as any
   if (typeof a.clipPath !== 'string' || a.clipPath.length === 0) return false
-  if (typeof a.startSec !== 'number' || !Number.isFinite(a.startSec) || a.startSec < 0) return false
-  if (typeof a.endSec !== 'number' || !Number.isFinite(a.endSec) || a.endSec <= a.startSec) return false
   if (a.mode !== 'overwrite' && a.mode !== 'copy') return false
+  if (!isItemList(a.items)) return false
   if (a.trackVolumes === undefined) return true
   return (
     Array.isArray(a.trackVolumes) &&
@@ -1932,6 +1931,37 @@ function isExportRequest(v: unknown): v is {
     return false
   }
   return true
+}
+
+/**
+ * Guard for the sequence crossing the IPC boundary.
+ *
+ * This only sees the shape: ids, and for each step either a source span or a gap
+ * length. The rules that decide whether an edit is *allowed* -- the tenth of a
+ * second of room a cut needs, something left to save -- live in @shared/cut.js,
+ * which is the same code the editor's own buttons run, so a rule can never be
+ * enforced in one place and ignored in the other.
+ */
+const isItemList = (v: unknown): boolean => {
+  if (!Array.isArray(v) || v.length === 0 || v.length > 500) return false
+  return v.every((item: any) => {
+    if (!item || typeof item !== 'object') return false
+    if (!Number.isInteger(item.id) || item.id < 0) return false
+    if (item.kind === 'keep') {
+      return (
+        typeof item.srcIn === 'number' &&
+        Number.isFinite(item.srcIn) &&
+        item.srcIn >= 0 &&
+        typeof item.srcOut === 'number' &&
+        Number.isFinite(item.srcOut) &&
+        item.srcOut - item.srcIn >= MIN_SEGMENT_SEC
+      )
+    }
+    if (item.kind === 'gap') {
+      return typeof item.durSec === 'number' && Number.isFinite(item.durSec) && item.durSec >= MIN_SEGMENT_SEC
+    }
+    return false
+  })
 }
 
 export { DEFAULT_SETTINGS }

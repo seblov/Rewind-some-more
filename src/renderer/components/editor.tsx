@@ -2,21 +2,38 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, clipUrl, formatBytes, formatDuration, messageOf } from '../lib/api'
 import { usePreviewAudio } from '../lib/editor-audio'
 import { Button, CenteredSpinner, cn } from './ui'
-import type { ClipAudioTrack } from '@shared/types.js'
+import {
+  canSave,
+  cutAt,
+  cutTarget,
+  deleteItems,
+  formatTimecode,
+  layout,
+  MIN_SEGMENT_SEC,
+  outAt,
+  parseTimecode,
+  snapToFrame,
+  spanAtOut,
+  splicePeaks,
+  srcAt,
+  type Item,
+  type Keep,
+  type Layout,
+  type Span,
+} from '@shared/cut.js'
+import type { ClipAudioTrack, ClipEditorInfo } from '@shared/types.js'
 
-interface ClipInfo {
-  duration: number
-  previewPath: string
-  audioTracks: ClipAudioTrack[]
-  /** Source size in bytes; drives the compress savings estimate. 0 if unreadable. */
-  fileSize: number
+/** The part of the editor state an undo step restores. */
+interface Snapshot {
+  items: Item[]
+  selected: number[]
 }
 
 /**
  * Chrome-less video element.
  *
  * A plain `<video>` is used rather than wavesurfer's media element because the
- * editor needs frame-accurate `currentTime` control for trim scrubbing, and the
+ * editor needs frame-accurate `currentTime` control for timeline scrubbing, and the
  * browser's own controls would fight the timeline. The element ref is owned by the
  * parent so seeking and play/pause can drive it directly.
  */
@@ -88,25 +105,45 @@ function pct(seconds: number, duration: number): number {
 /**
  * The clip editor.
  *
- * Trim range, per-track volume, and copy-or-overwrite. Waveform peaks are computed
- * in the main process (ffmpeg decode) and rendered as bars, which avoids shipping a
- * waveform renderer and keeps memory bounded for long clips.
+ * The edit is one ordered list of pieces -- what the clip still keeps, and the gaps
+ * it holds -- with its own undo history. Cut splits the piece under the playhead,
+ * Delete closes a piece up (or leaves a gap), and the file is written from that same
+ * list. Waveform peaks are computed in the main process (ffmpeg decode) and rendered
+ * as bars, which avoids shipping a waveform renderer and keeps memory bounded for
+ * long clips.
  */
 export function EditorPage({ clipPath }: { clipPath: string }) {
   const [loading, setLoading] = useState(true)
-  const [info, setInfo] = useState<ClipInfo | null>(null)
+  const [info, setInfo] = useState<ClipEditorInfo | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [saving, setSaving] = useState<{ mode: 'overwrite' | 'copy' } | null>(null)
 
   const [duration, setDuration] = useState(0)
-  const [startSec, setStartSec] = useState(0)
-  const [endSec, setEndSec] = useState(0)
+  /*
+   * The edit, with its own undo history.
+   *
+   * One state object per step rather than three arrays: undo restores the items *and*
+   * the selection the edit was made from, and a history that could disagree with what
+   * is on screen would be worse than none. The playhead is not in here: it is where
+   * the user is looking, not what they changed.
+   */
+  const [history, setHistory] = useState<{ past: Snapshot[]; present: Snapshot; future: Snapshot[] }>(() => ({
+    past: [],
+    present: { items: [], selected: [] },
+    future: [],
+  }))
+  const { items, selected } = history.present
   const [currentSec, setCurrentSec] = useState(0)
   const [playing, setPlaying] = useState(false)
   // Kept apart from `loadError`: a preview that will not decode is not a reason to
-  // throw away the loaded metadata and the trim range the user has already set.
+  // throw away the loaded metadata and the edit the user has already made.
   const [previewError, setPreviewError] = useState<string | null>(null)
+  /** Why the last cut was refused, shown beside the buttons until it goes stale. */
+  const [cutNotice, setCutNotice] = useState<string | null>(null)
+  const [snap, setSnap] = useState(true)
+  /** What the timecode box reads while it is being typed in; null when it follows the playhead. */
+  const [tcDraft, setTcDraft] = useState<string | null>(null)
 
   const [tracks, setTracks] = useState<ClipAudioTrack[]>([])
   const [volumes, setVolumes] = useState<Record<number, number>>({})
@@ -125,37 +162,84 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
   const [peaks, setPeaks] = useState<Record<number, number[]>>({})
 
   const videoRef = useRef<HTMLVideoElement>(null)
+  /** Item ids come from here: undo can restore an old list, so they must never repeat. */
+  const nextIdRef = useRef(1)
+  const nextId = useCallback(() => nextIdRef.current++, [])
+  /** The edit a trim drag started from, pushed as one history entry when it ends. */
+  const trimOrigin = useRef<Snapshot | null>(null)
+  /** The gap playback is holding, and when it ends. An ordinary seek calls it off. */
+  const gapHold = useRef<{ until: number; from: number; outFrom: number; lastPush: number; resumeAt: number } | null>(null)
+
+  const shape = useMemo(() => layout(items), [items])
+  const spans = shape.spans
+  const fps = info?.fps ?? 0
+
+  /** Writes a new edit and clears the redo tail, the way every editor does. */
+  const commit = useCallback((next: Snapshot) => {
+    setHistory((h) => ({ past: [...h.past.slice(-49), h.present], present: next, future: [] }))
+  }, [])
+
+  /** Selection changes are not edits: they do not land in the history. */
+  const select = useCallback((ids: number[]) => {
+    setHistory((h) => ({ ...h, present: { ...h.present, selected: ids } }))
+  }, [])
+
+  const undo = useCallback(() => {
+    setHistory((h) =>
+      h.past.length === 0
+        ? h
+        : { past: h.past.slice(0, -1), present: h.past[h.past.length - 1], future: [...h.future, h.present] },
+    )
+  }, [])
+
+  const redo = useCallback(() => {
+    setHistory((h) =>
+      h.future.length === 0
+        ? h
+        : { past: [...h.past, h.present], present: h.future[h.future.length - 1], future: h.future.slice(0, -1) },
+    )
+  }, [])
 
   /**
-   * Moves the playhead.
+   * Moves the playhead, in sequence time, and takes the preview to the matching frame.
    *
-   * This must drive the element, not just React state: the trim handles and the
-   * timeline lane both call it, and previously they only moved a label while the
-   * video kept playing, so "seeking" appeared to do nothing.
+   * Sequence time, not source time: the timeline the user sees is the sequence, so
+   * every control that moves the playhead speaks the same clock. Over a gap there is
+   * no frame to show and the element stays where it is; the picture is held black
+   * instead of jumping to the next piece.
    */
   const seek = useCallback(
-    (t: number) => {
+    (outT: number) => {
+      // A seek is the user taking over: whatever gap was being held is over.
+      gapHold.current = null
+      const target = Math.max(0, Math.min(outT, shape.duration))
+      const src = srcAt(spans, target)
       const video = videoRef.current
-      const limit = Number.isFinite(video?.duration) && (video?.duration ?? 0) > 0 ? video!.duration : t
-      const target = Math.max(0, Math.min(t, limit))
-      if (video) video.currentTime = target
+      if (video && src !== null) video.currentTime = src
       setCurrentSec(target)
     },
-    [],
+    [shape.duration, spans],
   )
 
-  /** Play/pause the element, keeping the trim window in view. */
+  /** Play/pause the element, picking up at the nearest piece when the playhead cannot play. */
   const togglePlay = useCallback(() => {
     const video = videoRef.current
     if (!video) return
-    if (video.paused) {
-      // Restart from the trim start when the playhead has run past the selection.
-      if (video.currentTime < startSec || video.currentTime >= endSec) seek(startSec)
-      void video.play().catch(() => setPlaying(false))
-    } else {
+    if (!video.paused) {
       video.pause()
+      return
     }
-  }, [startSec, endSec, seek])
+    if (currentSec >= shape.duration - 0.001) {
+      seek(0)
+    } else if (srcAt(spans, currentSec) === null) {
+      // Over a gap a press of play means "carry on from here": the gap is held by the
+      // seam guard during playback, and starting inside one would otherwise play
+      // whatever frame the element was left on.
+      const gapEnd = spanAtOut(spans, currentSec)?.outOut ?? 0
+      seek(gapEnd >= shape.duration - 0.001 ? 0 : gapEnd)
+    }
+    void video.play().catch(() => setPlaying(false))
+  }, [currentSec, shape.duration, spans, seek])
 
   // Load clip metadata, then waveform peaks for each audio track.
   useEffect(() => {
@@ -173,11 +257,19 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
           return
         }
 
-        const data = res.data as ClipInfo
+        const data = res.data
         setInfo(data)
         setDuration(data.duration || 0)
-        setStartSec(0)
-        setEndSec(data.duration || 0)
+        // The whole clip is the starting edit: one piece, nothing removed.
+        setHistory({
+          past: [],
+          present: {
+            items:
+              data.duration > 0 ? [{ id: nextId(), kind: 'keep', srcIn: 0, srcOut: data.duration }] : [],
+            selected: [],
+          },
+          future: [],
+        })
         setTracks(data.audioTracks)
         setLoading(false)
 
@@ -199,38 +291,122 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
     return () => {
       cancelled = true
     }
-  }, [clipPath])
+  }, [clipPath, nextId])
 
-  // Playback is clamped to the trim range.
+  /**
+   * The element reports in source time; the playhead is in sequence time.
+   *
+   * A frame that has run a hair past its piece -- the element's own clock is coarse
+   * until the seam guard moves it -- maps to nothing, and the playhead stays put
+   * rather than jumping somewhere the picture is not.
+   */
   const onTimeUpdate = useCallback(
     (t: number) => {
-      setCurrentSec(t)
-      if (t >= endSec) {
-        setCurrentSec(startSec)
-        seek(startSec)
-      }
+      const mapped = outAt(spans, t)
+      if (mapped !== null) setCurrentSec(mapped)
     },
-    [endSec, startSec, seek],
+    [spans],
   )
 
   const onPlayStateChange = useCallback((next: boolean) => {
     setPlaying(next)
   }, [])
 
-  // Space toggles playback, Escape cancels; both ignored while typing.
+  /*
+   * Playback skips the seams.
+   *
+   * `timeupdate` fires about four times a second, which is far too coarse for this: a
+   * piece could play a quarter second of removed footage before the handler noticed.
+   * This walks the element every frame, stops one frame short of the piece's end, and
+   * moves to whatever follows it: the next piece, a gap held black for its own length
+   * with the playhead crawling across it, or the top of the sequence again at the end.
+   *
+   * The hold lives in a ref, not in this effect's scope, because holding a gap pauses
+   * the element on purpose -- and a pause re-runs this effect. A hold kept in a local
+   * would be dropped on the spot, leaving the user stopped at the seam they just
+   * crossed.
+   */
   useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return
-      if (e.code === 'Space') {
-        e.preventDefault()
-        togglePlay()
-      } else if (e.code === 'Escape') {
-        void api.editorCancel()
+    // A hold keeps the loop alive even though the element is paused: that pause is the
+    // hold working, not the user stopping.
+    if (!playing && !gapHold.current) return
+    const frame = fps > 0 ? 1 / fps : 0.033
+    let raf = 0
+    let piece: Span | null = null
+
+    const tick = () => {
+      raf = requestAnimationFrame(tick)
+      const video = videoRef.current
+      if (!video) return
+      const now = performance.now()
+      const hold = gapHold.current
+
+      if (hold) {
+        if (now < hold.until) {
+          // Coarse on purpose: the picture is held, and the playhead only has to look
+          // like it is crossing the gap.
+          if (now - hold.lastPush > 100) {
+            hold.lastPush = now
+            setCurrentSec(hold.outFrom + (now - hold.from) / 1000)
+          }
+          return
+        }
+        gapHold.current = null
+        seek(hold.resumeAt)
+        void video.play().catch(() => setPlaying(false))
+        return
       }
+
+      if (!piece || !spans.includes(piece)) {
+        const at = outAt(spans, video.currentTime)
+        piece = at === null ? null : spanAtOut(spans, at)
+      }
+      if (!piece || piece.item.kind !== 'keep') return
+      if (video.currentTime < piece.item.srcOut - frame) return
+
+      // The piece is done. One frame of headroom: the element is asked to stop just
+      // before the frame the piece should not include.
+      const next = spans[spans.indexOf(piece) + 1]
+      if (!next) {
+        piece = null
+        seek(0)
+        return
+      }
+      piece = next
+      if (next.item.kind === 'gap') {
+        const after = spans[spans.indexOf(next) + 1]
+        video.pause()
+        gapHold.current = {
+          until: now + next.item.durSec * 1000,
+          from: now,
+          outFrom: next.outIn,
+          lastPush: now,
+          resumeAt: after ? after.outIn : 0,
+        }
+        piece = after ?? null
+        setCurrentSec(next.outIn)
+        return
+      }
+      seek(next.outIn)
     }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [togglePlay])
+
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [playing, spans, fps, seek])
+
+  /*
+   * The playhead cannot outlive the sequence it points into: a delete or an undo can
+   * move the end to the left of it.
+   */
+  useEffect(() => {
+    if (currentSec > shape.duration + 0.001) seek(shape.duration)
+  }, [currentSec, shape.duration, seek])
+
+  useEffect(() => {
+    if (!cutNotice) return
+    const t = window.setTimeout(() => setCutNotice(null), 2500)
+    return () => window.clearTimeout(t)
+  }, [cutNotice])
 
   /*
    * What actually gets written: master x per-track, per stream.
@@ -248,11 +424,23 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
     [tracks, volumes, masterVolume],
   )
 
+  // The waveforms cut to match the sequence, so a lane ends where the picture does
+  // and a gap shows the silence that will actually be written there.
+  const splicedPeaks = useMemo(() => {
+    const out: Record<number, number[]> = {}
+    if (!duration) return out
+    for (const track of tracks) {
+      const raw = peaks[track.stream]
+      if (raw?.length) out[track.stream] = splicePeaks(raw, duration, items)
+    }
+    return out
+  }, [peaks, tracks, duration, items])
+
   // The clip row's waveform: the loudest of the tracks at each point, so the
   // master line reads as the shape of the whole mix without decoding it again.
   // Computed here because every hook must sit above the early returns below.
   const masterPeaks = useMemo(() => {
-    const arrays = tracks.map((t) => peaks[t.stream]).filter((p): p is number[] => !!p && p.length > 0)
+    const arrays = tracks.map((t) => splicedPeaks[t.stream]).filter((p): p is number[] => !!p && p.length > 0)
     if (arrays.length === 0) return null
     const len = Math.min(...arrays.map((a) => a.length))
     const out = new Array<number>(len)
@@ -262,18 +450,181 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
       out[i] = loudest
     }
     return out
-  }, [tracks, peaks])
+  }, [tracks, splicedPeaks])
 
   const volumesChanged = masterVolume !== 1 || Object.values(volumes).some((v) => v !== 1)
 
   // Live monitoring: the sliders are heard as they are dragged, no re-encode.
   usePreviewAudio({ ready: !loading, broken: !!previewError, videoRef, tracks, volumes, masterVolume })
 
+  // Where a cut would land right now, or why it cannot. The button and the C key run
+  // the same rule the writer does, from the same module in @shared/cut.js.
+  const target = useMemo(() => cutTarget(items, currentSec, fps), [items, currentSec, fps])
+  const cutBlocked = 'error' in target ? target.error : null
+
+  const cut = useCallback(() => {
+    if ('error' in target) {
+      setCutNotice(target.error)
+      return
+    }
+    setCutNotice(null)
+    // The playhead ends up on the new seam, and nothing is selected: which side the
+    // user means is theirs to say, and picking one for them would be a guess.
+    commit({ items: cutAt(items, currentSec, fps, nextId), selected: [] })
+  }, [target, items, currentSec, fps, nextId, commit])
+
+  const removeSelected = useCallback(
+    (mode: 'ripple' | 'lift') => {
+      if (selected.length === 0) return
+      commit({ items: deleteItems(items, selected, mode), selected: [] })
+    },
+    [selected, items, commit],
+  )
+
+  const reset = useCallback(() => {
+    if (!duration) return
+    commit({ items: [{ id: nextId(), kind: 'keep', srcIn: 0, srcOut: duration }], selected: [] })
+  }, [duration, nextId, commit])
+
+  /*
+   * The editing keys, kept to the ones an NLE user already knows.
+   *
+   * All of them are ignored while a field has focus, so the timecode box can be typed
+   * in. Ctrl/Cmd+Z and Ctrl/Cmd+K follow Premiere and DaVinci; bare C is the cut, S
+   * toggles snapping, and Delete takes the selected piece out with the sequence
+   * closing up behind it (Shift+Delete leaves black in its place).
+   */
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return
+      const mod = e.ctrlKey || e.metaKey
+      const frame = fps > 0 ? 1 / fps : 0.02
+      if (e.code === 'Space') {
+        e.preventDefault()
+        togglePlay()
+      } else if (mod && e.code === 'KeyZ') {
+        e.preventDefault()
+        if (e.shiftKey) redo()
+        else undo()
+      } else if (mod && e.code === 'KeyY') {
+        e.preventDefault()
+        redo()
+      } else if (mod && e.code === 'KeyK') {
+        e.preventDefault()
+        cut()
+      } else if (e.code === 'KeyC' && !mod) {
+        cut()
+      } else if (e.code === 'KeyR' && !mod) {
+        reset()
+      } else if (e.code === 'KeyS' && !mod) {
+        setSnap((v) => !v)
+      } else if (e.code === 'Delete' || e.code === 'Backspace') {
+        if (selected.length === 0) return
+        e.preventDefault()
+        removeSelected(e.shiftKey ? 'lift' : 'ripple')
+      } else if (e.code === 'Escape') {
+        select([])
+      } else if (e.code === 'ArrowRight' || e.code === 'ArrowLeft') {
+        e.preventDefault()
+        seek(currentSec + (e.code === 'ArrowRight' ? 1 : -1) * (e.shiftKey ? 1 : frame))
+      } else if (e.code === 'Home') {
+        e.preventDefault()
+        seek(0)
+      } else if (e.code === 'End') {
+        e.preventDefault()
+        seek(shape.duration)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [togglePlay, undo, redo, cut, reset, removeSelected, select, seek, currentSec, shape.duration, fps, selected.length])
+
+  // A trim drag is one undo step, pushed when the drag ends rather than on every
+  // mouse move: a hundred entries for one handle would make undo useless.
+  const onTrimStart = useCallback(() => {
+    trimOrigin.current = history.present
+  }, [history.present])
+
+  const onTrim = useCallback((next: Item[]) => {
+    setHistory((h) => ({ ...h, present: { ...h.present, items: next } }))
+  }, [])
+
+  const onTrimEnd = useCallback(() => {
+    const origin = trimOrigin.current
+    trimOrigin.current = null
+    if (!origin) return
+    setHistory((h) => ({ past: [...h.past.slice(-49), origin], present: h.present, future: [] }))
+  }, [])
+
+  /** What Compress acts on: the selected piece, else the piece under the playhead. */
+  const exportSpan = useMemo(() => {
+    const picked = spans.find((s) => s.item.kind === 'keep' && selected.includes(s.item.id))
+    const under = spanAtOut(spans, currentSec)
+    const span = picked ?? (under && under.item.kind === 'keep' ? under : null)
+    if (!span || span.item.kind !== 'keep') return null
+    return { startSec: span.item.srcIn, endSec: span.item.srcOut, fromSelection: !!picked }
+  }, [spans, selected, currentSec])
+
+  // Where the selection sits on the output timeline, for the lane highlights.
+  const selectionSpan = useMemo(() => {
+    const picks = spans.filter((s) => selected.includes(s.item.id))
+    if (picks.length === 0) return null
+    return { startSec: picks[0].outIn, endSec: picks[picks.length - 1].outOut }
+  }, [spans, selected])
+
+  /** True while the playhead sits over a gap: black on the timeline, black on screen. */
+  const gapHere = spanAtOut(spans, currentSec)?.item.kind === 'gap'
+
+  // An edit worth warning about on close: anything but the whole clip, untouched.
+  const edited =
+    items.length !== 1 ||
+    items[0]?.kind !== 'keep' ||
+    items[0].srcIn > 0.01 ||
+    items[0].srcOut < duration - 0.01
+
+  const close = useCallback(() => {
+    if (edited && !window.confirm('Close without saving the cuts?')) return
+    void api.editorCancel()
+  }, [edited])
+
+  const saveState = canSave(items)
+  const gapCount = shape.gaps.length
+  const summary = [
+    `${shape.kept.length} piece${shape.kept.length === 1 ? '' : 's'}`,
+    gapCount ? `${gapCount} gap${gapCount === 1 ? '' : 's'}` : null,
+    volumesChanged
+      ? 'audio re-encoded'
+      : gapCount
+        ? 'black and silence in the gap'
+        : 'stream copy when every cut lands on a keyframe',
+  ]
+    .filter(Boolean)
+    .join(' · ')
+
+  /**
+   * Reads the timecode box back, including the frame field it shows.
+   *
+   * The frames are meaningless without the clip's rate, which @shared/cut.js's
+   * parser deliberately does not know, so they are added here.
+   */
+  const readTimecode = useCallback(
+    (text: string): number => {
+      const parts = text.trim().split(':')
+      if (parts.length === 4 && fps > 0) {
+        const frames = Number(parts[3])
+        const base = parseTimecode(parts.slice(0, 3).join(':'))
+        return Number.isFinite(base) && Number.isFinite(frames) ? base + frames / fps : NaN
+      }
+      return parseTimecode(text)
+    },
+    [fps],
+  )
+
   const save = async (mode: 'overwrite' | 'copy') => {
     setSaving({ mode })
     setSaveError(null)
     try {
-      const res = await api.editorSaveClip({ clipPath, startSec, endSec, mode, trackVolumes })
+      const res = await api.editorSaveClip({ clipPath, items, mode, trackVolumes })
       if (!res.success) {
         setSaveError(res.error || 'Failed to save clip')
         setSaving(null)
@@ -305,8 +656,6 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
     )
   }
 
-  const selectionLength = Math.max(0, endSec - startSec)
-
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-canvas text-ink">
       <header className="flex shrink-0 items-center gap-2 border-b border-line/60 px-5 py-3">
@@ -326,7 +675,7 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
                 <p className="text-[13px] text-danger">Preview unavailable</p>
                 <p className="text-[11px] text-ink-muted">{previewError}</p>
                 <p className="text-[11px] text-ink-faint">
-                  Trimming still works. Use the timeline to set the start and end points.
+                  Cutting still works. Use the timeline to cut and delete pieces.
                 </p>
               </div>
             ) : (
@@ -370,18 +719,94 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
                 </span>
               </button>
             )}
+
+            {/* A gap under the playhead is black on the timeline and black on screen:
+                the file holds black frames there. */}
+            {!previewError && gapHere ? <div className="pointer-events-none absolute inset-0 bg-black" /> : null}
           </div>
         </div>
 
         <div className="flex shrink-0 flex-col gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={!!saving || !!cutBlocked}
+              onClick={cut}
+              title={cutBlocked ?? 'Split the clip at the playhead (C)'}
+            >
+              Cut
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={!!saving || selected.length === 0}
+              onClick={() => removeSelected('ripple')}
+              title="Take the selected piece out and close the sequence up behind it (Delete)"
+            >
+              Delete
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={!!saving || selected.length === 0}
+              onClick={() => removeSelected('lift')}
+              title="Take the selected piece out and leave black in its place (Shift+Delete)"
+            >
+              Lift
+            </Button>
+            <span className="mx-1 h-4 w-px bg-line/60" />
+            <Button variant="ghost" size="sm" disabled={!!saving || history.past.length === 0} onClick={undo} title="Undo (Ctrl+Z)">
+              Undo
+            </Button>
+            <Button variant="ghost" size="sm" disabled={!!saving || history.future.length === 0} onClick={redo} title="Redo (Ctrl+Shift+Z)">
+              Redo
+            </Button>
+            <Button variant="ghost" size="sm" disabled={!!saving || !edited} onClick={reset} title="Keep the whole clip again (R)">
+              Reset
+            </Button>
+            <span className="mx-1 h-4 w-px bg-line/60" />
+            <Button
+              variant={snap ? 'secondary' : 'ghost'}
+              size="sm"
+              onClick={() => setSnap((v) => !v)}
+              title="Snap the playhead to cuts and piece edges (S)"
+            >
+              Snap {snap ? 'on' : 'off'}
+            </Button>
+            <input
+              className="tabular ml-1 w-[8.75rem] rounded border border-line/60 bg-canvas px-1.5 py-0.5 text-[11px] text-ink"
+              aria-label="Playhead timecode"
+              value={tcDraft ?? formatTimecode(currentSec, fps)}
+              onChange={(e) => setTcDraft(e.target.value)}
+              onBlur={() => {
+                if (tcDraft === null) return
+                const at = readTimecode(tcDraft)
+                if (Number.isFinite(at)) seek(at)
+                setTcDraft(null)
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.currentTarget.blur()
+                else if (e.key === 'Escape') setTcDraft(null)
+              }}
+            />
+            <span className="text-[11px] text-ink-faint">/ {formatTimecode(shape.duration, fps)}</span>
+            <span className="flex-1" />
+            {cutNotice ? <span className="text-[11px] text-ink-muted">{cutNotice}</span> : null}
+          </div>
+
           <Timeline
             duration={duration}
-            startSec={startSec}
-            endSec={endSec}
+            shape={shape}
             currentSec={currentSec}
+            fps={fps}
+            selected={selected}
+            snap={snap}
             onSeek={seek}
-            onChangeStart={setStartSec}
-            onChangeEnd={setEndSec}
+            onSelect={select}
+            onTrimStart={onTrimStart}
+            onTrim={onTrim}
+            onTrimEnd={onTrimEnd}
           />
 
           {tracks.length > 0 ? (
@@ -390,8 +815,8 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
                 value={masterVolume}
                 onChange={setMasterVolume}
                 peaks={masterPeaks ?? undefined}
-                startSec={startSec}
-                endSec={endSec}
+                contentSec={shape.duration}
+                selection={selectionSpan}
                 currentSec={currentSec}
                 duration={duration}
                 onSeek={seek}
@@ -401,10 +826,10 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
                   <AudioTrackLane
                     key={track.stream}
                     label={track.label}
-                    peaks={peaks[track.stream]}
+                    peaks={splicedPeaks[track.stream]}
                     volume={volumes[track.stream] ?? 1}
-                    startSec={startSec}
-                    endSec={endSec}
+                    contentSec={shape.duration}
+                    selection={selectionSpan}
                     currentSec={currentSec}
                     duration={duration}
                     onSeek={seek}
@@ -419,20 +844,25 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
 
           <div className="tabular flex items-center justify-between pt-1 text-[11px] text-ink-faint">
             <span>
-              {formatDuration(currentSec)} / {formatDuration(duration)}
+              {formatTimecode(currentSec, fps)} / {formatTimecode(shape.duration, fps)}
             </span>
-            <span>
-              Trim: {formatDuration(startSec)} → {formatDuration(endSec)} ({formatDuration(selectionLength)})
-            </span>
+            <span>{summary}</span>
           </div>
 
           <ExportSection
             clipPath={clipPath}
-            startSec={startSec}
-            endSec={endSec}
+            startSec={exportSpan?.startSec ?? 0}
+            endSec={exportSpan?.endSec ?? 0}
             duration={duration}
             fileSize={info.fileSize}
             busy={!!saving}
+            scope={
+              exportSpan
+                ? exportSpan.fromSelection
+                  ? 'the selected piece'
+                  : 'the piece under the playhead'
+                : 'nothing under the playhead'
+            }
           />
 
           {saveError ? <p className="text-[11px] text-danger">{saveError}</p> : null}
@@ -441,24 +871,30 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
 
       <footer className="flex shrink-0 items-center gap-2 border-t border-line/60 px-4 py-2.5">
         <p className="flex-1 text-[11px] text-ink-faint">
-          {volumesChanged ? 'Audio volumes changed — the clip will be re-encoded.' : 'No audio changes — trim is a stream copy.'}
+          {saveState.ok
+            ? volumesChanged
+              ? 'Audio volumes changed — the clip will be re-encoded.'
+              : gapCount
+                ? 'A gap is written as black and silence — this save re-encodes.'
+                : 'Cuts on keyframes save as a stream copy.'
+            : saveState.error}
         </p>
-        <Button variant="secondary" disabled={!!saving} onClick={() => void api.editorCancel()}>
+        <Button variant="secondary" disabled={!!saving} onClick={close} title="Close the editor (Escape clears the selection first)">
           Close
         </Button>
         <Button
           variant="secondary"
-          disabled={!!saving || selectionLength < 1}
+          disabled={!!saving || !saveState.ok}
           onClick={() => void save('copy')}
-          title="Writes the trimmed range to a new file; the original is kept"
+          title="Writes the edit to a new file beside the clip; the original is kept"
         >
           {saving?.mode === 'copy' ? 'Saving…' : 'Save a copy'}
         </Button>
         <Button
           variant="primary"
-          disabled={!!saving || selectionLength < 1}
+          disabled={!!saving || !saveState.ok}
           onClick={() => void save('overwrite')}
-          title="Writes the trimmed range over the original clip"
+          title="Writes the edit over the original clip"
         >
           {saving?.mode === 'overwrite' ? 'Saving…' : 'Replace original'}
         </Button>
@@ -482,6 +918,7 @@ function ExportSection({
   duration,
   fileSize,
   busy,
+  scope,
 }: {
   clipPath: string
   startSec: number
@@ -489,6 +926,8 @@ function ExportSection({
   duration: number
   fileSize: number
   busy: boolean
+  /** Which piece the section will act on, in words, for the header line. */
+  scope: string
 }) {
   /** Fraction of the source's own bitrate each chip encodes at. */
   const QUALITY_FRACTIONS = { low: 0.4, medium: 0.65, high: 0.9 } as const
@@ -498,7 +937,7 @@ function ExportSection({
   const [percent, setPercent] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<{ path: string; bytes: number } | null>(null)
-  // Off by default: the box collapses to its title, out of the way of the trim work
+  // Off by default: the box collapses to its title, out of the way of the cut work
   // it sits under, and only opens when the user asks for a compressed copy.
   const [compressOn, setCompressOn] = useState(false)
 
@@ -563,7 +1002,11 @@ function ExportSection({
   }
 
   const exportDisabledReason =
-    exportLength < 1 ? 'Select at least 1 second to export' : running ? 'An export is already running' : null
+    exportLength < 1
+      ? 'Nothing to compress here — put the playhead on a piece, or select one'
+      : running
+        ? 'An export is already running'
+        : null
 
   return (
     <div className="overflow-hidden rounded-lg border border-line bg-surface px-3 py-2" data-testid="export-section">
@@ -571,6 +1014,9 @@ function ExportSection({
           and a resize reflows nothing — the flexible text shrinks instead. */}
       <div className="flex flex-nowrap items-center gap-x-3">
         <span className="text-[12px] font-medium">Compress</span>
+        <span className="truncate text-[11px] text-ink-faint" data-testid="export-scope">
+          on {scope}
+        </span>
         <button
           type="button"
           aria-pressed={compressOn}
@@ -662,100 +1108,125 @@ function ExportSection({
 }
 
 /**
- * Trim timeline.
+ * The timeline: the sequence as a strip of pieces, and where every edit starts.
  *
- * The selected region is a draggable overlay between two handles; clicking the
- * lane scrubs. Handles clamp against each other so the region can't invert.
+ * Drawn from the same `Layout` the writer runs from (@shared/cut.js), so a piece, a
+ * cut tick, a gap and the length on screen are the edit that will be written, never a
+ * second opinion about it. The x scale is the *source* clip, so the strip shrinks to
+ * the left as pieces come out and the empty track past the end is space the edit no
+ * longer uses. A cut is drawn as a tick where the source runs on; where it does not --
+ * a piece the user deleted, or one they lifted -- the break is drawn as a seam.
  */
 function Timeline({
   duration,
-  startSec,
-  endSec,
+  shape,
   currentSec,
+  fps,
+  selected,
+  snap,
   onSeek,
-  onChangeStart,
-  onChangeEnd,
+  onSelect,
+  onTrimStart,
+  onTrim,
+  onTrimEnd,
 }: {
+  /** Source length: the x scale. */
   duration: number
-  startSec: number
-  endSec: number
+  shape: Layout
   currentSec: number
-  onSeek: (t: number) => void
-  onChangeStart: (t: number) => void
-  onChangeEnd: (t: number) => void
+  fps: number
+  selected: number[]
+  snap: boolean
+  onSeek: (outSec: number) => void
+  onSelect: (ids: number[]) => void
+  onTrimStart: () => void
+  onTrim: (items: Item[]) => void
+  onTrimEnd: () => void
 }) {
   const laneRef = useRef<HTMLDivElement>(null)
-  const [dragging, setDragging] = useState<'start' | 'end' | 'move' | null>(null)
-  /**
-   * Where the move gesture began.
-   *
-   * Held for the whole gesture rather than read from live props, because a drag
-   * that recomputed its origin from the current start/end on every mousemove
-   * would compound: each event would measure from where the last one landed, and
-   * the selection would run away from the cursor.
-   */
-  const moveOrigin = useRef<{ x: number; start: number; end: number; moved: boolean } | null>(null)
+  const [drag, setDrag] = useState<{ kind: 'playhead' } | { kind: 'head' } | { kind: 'tail' } | null>(null)
+  const [hoverSec, setHoverSec] = useState<number | null>(null)
+
+  const total = duration > 0 ? duration : 1
+  const items = useMemo(() => shape.spans.map((s) => s.item), [shape])
+
+  /** Everything a cut could sensibly land on: the ends of the sequence, and its seams. */
+  const targets = useMemo(() => [0, shape.duration, ...shape.spans.flatMap((s) => [s.outIn, s.outOut])], [shape])
 
   const toSeconds = useCallback(
-    (clientX: number) => {
+    (clientX: number): number => {
       const rect = laneRef.current?.getBoundingClientRect()
-      if (!rect || duration <= 0) return 0
+      if (!rect || rect.width <= 0) return 0
       const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
-      return ratio * duration
+      const raw = ratio * total
+      const framed = snapToFrame(raw, fps)
+      if (!snap) return framed
+      // A magnet about eight pixels wide: wide enough to catch a seam, narrow enough
+      // to leave the rest of the clip reachable.
+      const radius = total * 0.012
+      let best = framed
+      let bestDist = Infinity
+      for (const target of targets) {
+        const dist = Math.abs(target - raw)
+        if (dist <= radius && dist < bestDist) {
+          bestDist = dist
+          best = snapToFrame(target, fps)
+        }
+      }
+      return best
     },
-    [duration],
+    [total, fps, snap, targets],
+  )
+
+  /** Raises or lowers the open edge of the first piece: the head of the clip. */
+  const trimHead = useCallback(
+    (outT: number) => {
+      const first = shape.spans[0]
+      if (!first || first.item.kind !== 'keep') return
+      const item = first.item
+      const at = snapToFrame(
+        Math.max(0, Math.min(item.srcIn + (outT - first.outIn), item.srcOut - MIN_SEGMENT_SEC)),
+        fps,
+      )
+      onTrim([{ ...item, srcIn: at }, ...items.slice(1)])
+    },
+    [shape, items, fps, onTrim],
+  )
+
+  /** The same, at the other end of the last piece. */
+  const trimTail = useCallback(
+    (outT: number) => {
+      const last = shape.spans[shape.spans.length - 1]
+      if (!last || last.item.kind !== 'keep') return
+      const item = last.item
+      const at = snapToFrame(
+        Math.min(total, Math.max(item.srcIn + MIN_SEGMENT_SEC, item.srcOut + (outT - last.outIn))),
+        fps,
+      )
+      onTrim([...items.slice(0, -1), { ...item, srcOut: at }])
+    },
+    [shape, items, total, fps, onTrim],
   )
 
   useEffect(() => {
-    if (!dragging) return
-
+    if (!drag) return
     const onMove = (e: MouseEvent) => {
       const t = toSeconds(e.clientX)
-      if (dragging === 'start') {
-        onChangeStart(Math.min(t, endSec - 0.1))
-        return
-      }
-      if (dragging === 'end') {
-        onChangeEnd(Math.max(t, startSec + 0.1))
-        return
-      }
-
-      const origin = moveOrigin.current
-      const rect = laneRef.current?.getBoundingClientRect()
-      if (!origin || !rect || rect.width <= 0) return
-      origin.moved = true
-
-      const length = origin.end - origin.start
-      let delta = ((e.clientX - origin.x) / rect.width) * duration
-      // Slide the window rather than resize it: clamp the travel so neither end
-      // can leave the clip, which keeps the selection length exactly as it was.
-      delta = Math.max(-origin.start, Math.min(duration - origin.end, delta))
-      onChangeStart(origin.start + delta)
-      onChangeEnd(origin.end + delta)
+      if (drag.kind === 'playhead') onSeek(Math.min(t, shape.duration))
+      else if (drag.kind === 'head') trimHead(t)
+      else trimTail(t)
     }
-
     const onUp = () => {
-      // A press with no movement is a click, not a drag: scrub there rather than
-      // silently doing nothing, which is what swallowing it would look like.
-      const origin = moveOrigin.current
-      if (origin && !origin.moved) onSeek(toSeconds(origin.x))
-      moveOrigin.current = null
-      setDragging(null)
+      if (drag.kind !== 'playhead') onTrimEnd()
+      setDrag(null)
     }
-
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
     return () => {
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
     }
-  }, [dragging, toSeconds, startSec, endSec, duration, onSeek, onChangeStart, onChangeEnd])
-
-  const beginMove = (e: React.MouseEvent) => {
-    e.stopPropagation()
-    moveOrigin.current = { x: e.clientX, start: startSec, end: endSec, moved: false }
-    setDragging('move')
-  }
+  }, [drag, toSeconds, shape.duration, onSeek, onTrimEnd, trimHead, trimTail])
 
   /*
    * Wheel scrub: scroll up rewinds, scroll down advances. The first notch lands
@@ -772,7 +1243,6 @@ function Timeline({
   useEffect(() => {
     const lane = laneRef.current
     if (!lane) return
-    const clampToClip = (t: number) => Math.max(0, Math.min(duration, t))
     const flush = () => {
       wheelRafRef.current = null
       const target = pendingRef.current
@@ -787,7 +1257,7 @@ function Timeline({
       e.preventDefault()
       const step = (e.deltaY || e.deltaX) / 100 // one notch ≈ 1 second
       const base = pendingRef.current ?? lastRef.current ?? currentRef.current
-      const next = clampToClip(base + step)
+      const next = Math.max(0, Math.min(shape.duration, base + step))
       if (wheelRafRef.current !== null) {
         // A frame is already queued: ride along with it.
         pendingRef.current = next
@@ -806,68 +1276,206 @@ function Timeline({
       pendingRef.current = null
       lastRef.current = null
     }
-  }, [duration, onSeek])
+  }, [shape.duration, onSeek])
 
-  const startPct = pct(startSec, duration)
-  const endPct = pct(endSec, duration)
-  const playheadPct = pct(currentSec, duration)
+  // Ruler labels: a step that leaves at most eight of them whatever the clip's length.
+  const step = useMemo(() => [1, 2, 5, 10, 15, 30, 60, 300].find((s) => total / s <= 8) ?? 600, [total])
+  const ticks = useMemo(() => {
+    const out: number[] = []
+    for (let i = 0; i * step <= shape.duration + 1e-6; i++) out.push(Number((i * step).toFixed(3)))
+    return out
+  }, [shape.duration, step])
+
+  /*
+   * What the seams mean. Two pieces that meet where the source carries on are a cut:
+   * one clip became two with nothing in between. Any other break -- a piece taken
+   * out, or a piece lifted -- is a jump in the source, and the seconds it skips are
+   * worth saying out loud.
+   */
+  const seams = useMemo(
+    () =>
+      shape.spans.slice(0, -1).map((span, i) => {
+        const next = shape.spans[i + 1]
+        const keeps = span.item.kind === 'keep' && next.item.kind === 'keep'
+        const srcOut = span.item.kind === 'keep' ? span.item.srcOut : null
+        const removedSec =
+          keeps && span.item.kind === 'keep' && next.item.kind === 'keep'
+            ? Math.max(0, next.item.srcIn - span.item.srcOut)
+            : next.item.kind === 'gap'
+              ? next.item.durSec
+              : 0
+        return {
+          at: span.outOut,
+          cut: keeps && removedSec < 0.001,
+          srcOut,
+          removedSec,
+        }
+      }),
+    [shape],
+  )
+
+  const playheadPct = pct(currentSec, total)
+  const first = shape.spans[0]
+  const last = shape.spans[shape.spans.length - 1]
+  const titled = 'Scroll to scrub · click to seek · click a piece to select · drag its edge to trim'
 
   return (
-    <div className="relative">
+    <div className="flex flex-col">
+      <div className="relative ml-0.5 mr-0.5 h-4 text-[10px] text-ink-faint" aria-hidden>
+        {ticks.map((t) => (
+          <span key={t} className="absolute top-0 -translate-x-1/2" style={{ left: `${pct(t, total)}%` }}>
+            {formatDuration(t)}
+          </span>
+        ))}
+      </div>
+
       <div
         ref={laneRef}
         role="slider"
         tabIndex={0}
-        title="Scroll to scrub · click to seek · drag the handles to trim"
+        title={titled}
         aria-label="Playhead"
         aria-valuemin={0}
-        aria-valuemax={Math.round(duration)}
+        aria-valuemax={Math.round(shape.duration)}
         aria-valuenow={Math.round(currentSec)}
-        aria-valuetext={`${formatDuration(currentSec)} of ${formatDuration(duration)}`}
-        onClick={(e) => onSeek(toSeconds(e.clientX))}
+        aria-valuetext={`${formatTimecode(currentSec, fps)} of ${formatTimecode(shape.duration, fps)}`}
+        onClick={(e) => {
+          onSelect([])
+          onSeek(Math.min(toSeconds(e.clientX), shape.duration))
+        }}
+        onMouseMove={(e) => setHoverSec(toSeconds(e.clientX))}
+        onMouseLeave={() => setHoverSec(null)}
         onKeyDown={(e) => {
           // A control that declares `role="slider"` has to answer to the keyboard.
-          // Dragging the handles needs a pointer, so this moves the playhead, which
-          // is what the lane's own affordance is for.
-          const step = e.shiftKey ? 5 : 1
-          if (e.key === 'ArrowRight') onSeek(currentSec + step)
-          else if (e.key === 'ArrowLeft') onSeek(currentSec - step)
+          // Dragging needs a pointer, so this moves the playhead, which is what the
+          // lane's own affordance is for.
+          const frame = fps > 0 ? 1 / fps : 0.02
+          const stepSec = e.shiftKey ? 1 : frame
+          if (e.key === 'ArrowRight') onSeek(currentSec + stepSec)
+          else if (e.key === 'ArrowLeft') onSeek(currentSec - stepSec)
           else if (e.key === 'Home') onSeek(0)
-          else if (e.key === 'End') onSeek(duration)
+          else if (e.key === 'End') onSeek(shape.duration)
           else return
           e.preventDefault()
         }}
-        className="relative h-8 cursor-pointer rounded bg-raised/60"
+        className="relative h-9 cursor-pointer rounded bg-raised/40"
       >
-        <div
-          onMouseDown={beginMove}
-          onClick={(e) => e.stopPropagation()}
-          title="Drag to move the whole selection"
-          className={cn(
-            'absolute inset-y-0 rounded bg-accent/15',
-            dragging === 'move' ? 'cursor-grabbing' : 'cursor-grab',
-          )}
-          style={{ left: `${startPct}%`, width: `${Math.max(0, endPct - startPct)}%` }}
-        />
+        {shape.spans.map((span) => {
+          const item = span.item
+          const isGap = item.kind === 'gap'
+          const picked = selected.includes(item.id)
+          const length = span.outOut - span.outIn
+          return (
+            <button
+              key={item.id}
+              type="button"
+              aria-pressed={picked}
+              data-testid={isGap ? 'timeline-gap' : 'timeline-piece'}
+              onClick={(e) => {
+                e.stopPropagation()
+                // Shift extends: two pieces can be taken out in one delete.
+                if (e.shiftKey) {
+                  onSelect(picked ? selected.filter((id) => id !== item.id) : [...selected, item.id])
+                } else {
+                  onSelect([item.id])
+                }
+              }}
+              title={
+                isGap
+                  ? `Gap · ${formatDuration(item.durSec)} of black and silence (Shift+Delete put it here)`
+                  : `Piece · ${formatTimecode(item.srcIn, fps)} → ${formatTimecode(item.srcOut, fps)} in the clip`
+              }
+              style={{
+                left: `${pct(span.outIn, total)}%`,
+                width: `${pct(length, total)}%`,
+                minWidth: 2,
+                ...(isGap
+                  ? {
+                      backgroundImage:
+                        'repeating-linear-gradient(45deg, rgba(148,163,184,0.22) 0 3px, transparent 3px 7px)',
+                    }
+                  : null),
+              }}
+              className={cn(
+                'absolute inset-y-1 overflow-hidden rounded border text-left transition-colors',
+                isGap
+                  ? 'border-dashed border-line/70 text-ink-faint hover:border-line'
+                  : picked
+                    ? 'border-accent/70 bg-accent/25 text-ink'
+                    : 'border-line/60 bg-raised/80 text-ink-muted hover:bg-raised',
+              )}
+            >
+              <span className="block truncate px-1 text-[10px] leading-[1.4rem]">
+                {isGap
+                  ? `gap ${formatDuration(item.durSec)}`
+                  : item.srcIn < 0.001
+                    ? formatDuration(item.srcOut)
+                    : `${formatDuration(item.srcIn)}→${formatDuration(item.srcOut)}`}
+              </span>
+            </button>
+          )
+        })}
+
+        {/* The seams, drawn over the pieces: a tick where the source runs on, a dashed
+            marker where it jumps. */}
+        {seams.map((seam) => (
+          <div
+            key={seam.at}
+            className={cn(
+              'pointer-events-none absolute inset-y-0 w-px',
+              seam.cut ? 'bg-ink/70' : 'border-l border-dashed border-accent/70',
+            )}
+            style={{ left: `${pct(seam.at, total)}%` }}
+            title={
+              seam.cut
+                ? `Cut · ${formatTimecode(seam.srcOut ?? 0, fps)}`
+                : seam.removedSec > 0
+                  ? `Seam · ${formatDuration(seam.removedSec)} removed here`
+                  : 'Seam'
+            }
+          />
+        ))}
+
+        {hoverSec !== null && !drag ? (
+          <div className="pointer-events-none absolute inset-y-0 w-px bg-ink/25" style={{ left: `${pct(hoverSec, total)}%` }} />
+        ) : null}
+
+        <div className="pointer-events-none absolute inset-y-0 w-px bg-ink" style={{ left: `${playheadPct}%` }} />
         <div
           onMouseDown={(e) => {
             e.stopPropagation()
-            setDragging('start')
+            setDrag({ kind: 'playhead' })
           }}
-          className="absolute inset-y-0 w-2.5 cursor-ew-resize rounded bg-accent"
-          style={{ left: `calc(${startPct}% - 5px)` }}
-          title={`Trim start — ${formatDuration(startSec)}`}
+          title={`Playhead — ${formatTimecode(currentSec, fps)} · drag to scrub`}
+          className="absolute top-0 h-2.5 w-2.5 -translate-x-1/2 cursor-ew-resize rounded-sm bg-ink"
+          style={{ left: `${playheadPct}%` }}
         />
-        <div
-          onMouseDown={(e) => {
-            e.stopPropagation()
-            setDragging('end')
-          }}
-          className="absolute inset-y-0 w-2.5 cursor-ew-resize rounded bg-accent"
-          style={{ left: `calc(${endPct}% - 5px)` }}
-          title={`Trim end — ${formatDuration(endSec)}`}
-        />
-        <div className="absolute inset-y-0 w-px bg-ink" style={{ left: `${playheadPct}%` }} />
+
+        {/* The open edges of the edit: the only two places there is outside footage to
+            trim against. Inside the sequence a piece edge is a cut, not a handle. */}
+        {first?.item.kind === 'keep' ? (
+          <div
+            onMouseDown={(e) => {
+              e.stopPropagation()
+              onTrimStart()
+              setDrag({ kind: 'head' })
+            }}
+            title={`Start of the clip — ${formatTimecode(first.item.srcIn, fps)} · drag to trim`}
+            className="absolute inset-y-0 -left-1.5 w-1.5 cursor-ew-resize rounded-l bg-accent/70 hover:bg-accent"
+          />
+        ) : null}
+        {last?.item.kind === 'keep' ? (
+          <div
+            onMouseDown={(e) => {
+              e.stopPropagation()
+              onTrimStart()
+              setDrag({ kind: 'tail' })
+            }}
+            title={`End of the clip — ${formatTimecode(last.item.srcOut, fps)} · drag to trim`}
+            className="absolute inset-y-0 w-1.5 cursor-ew-resize rounded-r bg-accent/70 hover:bg-accent"
+            style={{ left: `${pct(shape.duration, total)}%` }}
+          />
+        ) : null}
       </div>
     </div>
   )
@@ -885,8 +1493,8 @@ function MasterVolumeRow({
   value,
   onChange,
   peaks,
-  startSec,
-  endSec,
+  contentSec,
+  selection,
   currentSec,
   duration,
   onSeek,
@@ -895,8 +1503,8 @@ function MasterVolumeRow({
   onChange: (v: number) => void
   /** Loudest of the tracks at each point — the shape of the whole mix. */
   peaks?: number[]
-  startSec: number
-  endSec: number
+  contentSec: number
+  selection: { startSec: number; endSec: number } | null
   currentSec: number
   duration: number
   onSeek: (t: number) => void
@@ -912,8 +1520,8 @@ function MasterVolumeRow({
       <LaneGraph
         label="Clip volume"
         peaks={peaks}
-        startSec={startSec}
-        endSec={endSec}
+        contentSec={contentSec}
+        selection={selection}
         currentSec={currentSec}
         duration={duration}
         onSeek={onSeek}
@@ -935,27 +1543,28 @@ function MasterVolumeRow({
 }
 
 /**
- * The waveform lane shared by every audio row: the peak envelope, the trim window
- * (kept range bright, cutaways dimmed) and the playhead, clickable to seek.
+ * The waveform lane shared by every audio row: the peak envelope, the piece the
+ * selection covers, and the playhead, clickable to seek.
  *
- * The waveform spans the whole clip, because that is what the engine decoded.
- * What the user is trimming is a window inside it, so the lane shows that window
- * the way the video timeline does. Without this the lane looked identical whether
- * trimmed or not, and read as though the trim had not been applied at all.
+ * The envelope is the sequence's, not the source's: the peaks arrive already cut to
+ * match the pieces (@shared/cut.js's splicePeaks), so the lane ends where the picture
+ * does and the space past the end is the footage the edit no longer uses. A lane that
+ * still showed the removed audio would read as though the cuts had not been applied.
  */
 function LaneGraph({
   label,
   peaks,
-  startSec,
-  endSec,
+  contentSec,
+  selection,
   currentSec,
   duration,
   onSeek,
 }: {
   label: string
   peaks?: number[]
-  startSec: number
-  endSec: number
+  /** Where the sequence ends: the waveform spans this much of the lane. */
+  contentSec: number
+  selection: { startSec: number; endSec: number } | null
   currentSec: number
   duration: number
   onSeek: (t: number) => void
@@ -968,13 +1577,12 @@ function LaneGraph({
       if (!el) return 0
       const r = el.getBoundingClientRect()
       if (r.width <= 0) return 0
-      return Math.max(0, Math.min(duration, ((clientX - r.left) / r.width) * duration))
+      return Math.max(0, Math.min(contentSec, ((clientX - r.left) / r.width) * duration))
     },
-    [duration],
+    [duration, contentSec],
   )
 
-  const startPct = pct(startSec, duration)
-  const endPct = pct(endSec, duration)
+  const contentPct = pct(contentSec, duration)
   const playheadPct = pct(currentSec, duration)
 
   return (
@@ -984,48 +1592,51 @@ function LaneGraph({
       tabIndex={0}
       aria-label={`${label} playhead`}
       aria-valuemin={0}
-      aria-valuemax={Math.round(duration)}
+      aria-valuemax={Math.round(contentSec)}
       aria-valuenow={Math.round(currentSec)}
-      aria-valuetext={`${formatDuration(currentSec)} of ${formatDuration(duration)}`}
+      aria-valuetext={`${formatDuration(currentSec)} of ${formatDuration(contentSec)}`}
       onClick={(e) => onSeek(toSeconds(e.clientX))}
       onKeyDown={(e) => {
         const step = e.shiftKey ? 5 : 1
-        if (e.key === 'ArrowRight') onSeek(Math.min(endSec, currentSec + step))
-        else if (e.key === 'ArrowLeft') onSeek(Math.max(startSec, currentSec - step))
+        if (e.key === 'ArrowRight') onSeek(Math.min(contentSec, currentSec + step))
+        else if (e.key === 'ArrowLeft') onSeek(Math.max(0, currentSec - step))
         else return
         e.preventDefault()
       }}
       className="relative h-8 flex-1 cursor-pointer overflow-hidden rounded bg-raised/40"
     >
-      {peaks && peaks.length > 0 ? (
-        <Waveform peaks={peaks} />
-      ) : (
-        <div className="flex h-full items-center justify-center text-[11px] text-ink-muted">
-          No waveform data
-        </div>
-      )}
+      {/* The waveform is only as wide as the sequence: past it is footage the edit
+          no longer holds. */}
+      <div className="absolute inset-y-0 left-0" style={{ width: `${contentPct}%` }}>
+        {peaks && peaks.length > 0 ? (
+          <Waveform peaks={peaks} />
+        ) : (
+          <div className="flex h-full items-center justify-center text-[11px] text-ink-muted">
+            No waveform data
+          </div>
+        )}
+      </div>
 
-      {/* Cut away: dimmed, and not clickable-looking. */}
-      {startPct > 0 ? (
-        <div
-          className="absolute inset-y-0 left-0 bg-canvas/60"
-          style={{ width: `${startPct}%` }}
-          title={`Trimmed — ${formatDuration(startSec)}`}
-        />
-      ) : null}
-      {endPct < 100 ? (
+      {/* The footage the edit no longer uses, dimmed to match the empty track on the
+          video timeline. */}
+      {contentPct < 100 ? (
         <div
           className="absolute inset-y-0 right-0 bg-canvas/60"
-          style={{ width: `${Math.max(0, 100 - endPct)}%` }}
-          title={`Trimmed — ${formatDuration(endSec)}`}
+          style={{ width: `${Math.max(0, 100 - contentPct)}%` }}
+          title={`Beyond the end of the edit — ${formatDuration(Math.max(0, duration - contentSec))} of the source is not in the file`}
         />
       ) : null}
 
-      {/* Kept range, matching the accent of the video timeline's selection. */}
-      <div
-        className="pointer-events-none absolute inset-y-0 border-x border-accent/60 bg-accent/10"
-        style={{ left: `${startPct}%`, width: `${Math.max(0, endPct - startPct)}%` }}
-      />
+      {/* The selection, matching the video timeline's highlight. */}
+      {selection ? (
+        <div
+          className="pointer-events-none absolute inset-y-0 border-x border-accent/60 bg-accent/10"
+          style={{
+            left: `${pct(selection.startSec, duration)}%`,
+            width: `${Math.max(0, pct(selection.endSec, duration) - pct(selection.startSec, duration))}%`,
+          }}
+        />
+      ) : null}
 
       {/* Same playhead as the video lane, so the two read as one timeline. */}
       <div className="absolute inset-y-0 w-px bg-ink" style={{ left: `${playheadPct}%` }} />
@@ -1038,8 +1649,8 @@ function AudioTrackLane({
   label,
   peaks,
   volume,
-  startSec,
-  endSec,
+  contentSec,
+  selection,
   currentSec,
   duration,
   onSeek,
@@ -1048,8 +1659,8 @@ function AudioTrackLane({
   label: string
   peaks?: number[]
   volume: number
-  startSec: number
-  endSec: number
+  contentSec: number
+  selection: { startSec: number; endSec: number } | null
   currentSec: number
   duration: number
   onSeek: (t: number) => void
@@ -1061,8 +1672,8 @@ function AudioTrackLane({
       <LaneGraph
         label={label}
         peaks={peaks}
-        startSec={startSec}
-        endSec={endSec}
+        contentSec={contentSec}
+        selection={selection}
         currentSec={currentSec}
         duration={duration}
         onSeek={onSeek}

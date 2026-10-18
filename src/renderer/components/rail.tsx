@@ -225,7 +225,7 @@ function ClipCard({
           <span onClick={(e) => e.stopPropagation()}>
             <CardMenu open={menuOpen} onOpenChange={setMenuOpen}>
               <Item icon={<Scissors className="h-3.5 w-3.5" strokeWidth={1.5} />} onSelect={onOpenEditor}>
-                Trim in editor
+                Cut in editor
               </Item>
               <Item
                 icon={<Copy className="h-3.5 w-3.5" strokeWidth={1.5} />}

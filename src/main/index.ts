@@ -850,12 +850,22 @@ const services = {
   closeEditorWindow,
   saveEditorClip: (req: any) =>
     saveClip(req, {
-      getMainWindow,
-      onCopied: (p, recordedAt, source) =>
-        setClipMeta(p, { recordedAt, source: source ?? undefined, edited: true, editedAt: Date.now() }),
+      // The saved file is an edited clip like any `-edit` copy: it carries the
+      // source's recording time and its track labels, so the library lists it as the
+      // same take and the editor names its audio lanes rather than calling them
+      // `Track 1..n`.
+      onCopied: (p, recordedAt, fromPath) => {
+        const from = getClipMeta(fromPath)
+        setClipMeta(p, {
+          recordedAt,
+          source: from?.source,
+          audioTracks: from?.audioTracks,
+          edited: true,
+          editedAt: Date.now(),
+        })
+      },
       onReplaced: (p, editedAt) => setClipMeta(p, { edited: true, editedAt }),
       getClipMeta,
-      getAudioTrackLabels: () => getClipMeta(currentEditorClip()?.clipPath ?? '')?.audioTracks ?? ['Mix'],
     }),
 }
 

@@ -11,6 +11,8 @@ import {
   resolveFfmpeg,
   uniquePath,
 } from './ffmpeg.js'
+import { analyzeAudio, writeSequence, type StreamVolume } from './cut.js'
+import { canSave, type Item } from '@shared/cut.js'
 import { devServerUrl } from './window.js'
 
 const log = scope('ClipEditor')
@@ -85,29 +87,6 @@ export interface ClipInfoResult {
   width: number
   height: number
   fps: number
-}
-
-interface ProbeAudioInfo {
-  streamCount: number
-  split: boolean
-  labels: string[]
-}
-
-/**
- * Decides how to address the clip's audio streams, and names them.
- *
- * More than one stream in the file means the recording split its tracks, whatever
- * the app's settings say now — a clip carries its own layout for life, and gating on
- * the live label count silently collapsed every multi-track clip into one mix the
- * moment the setting was turned off. Stream 0 is the mix the recorder always writes,
- * so it is dropped when the tracks are split. Labels come from the recording; a clip
- * with no recorded labels still splits, with generic names.
- */
-export function analyzeAudio(info: ProbeAudioInfo): { split: boolean; streams: number[]; labels: string[] } {
-  if (info.streamCount === 0) return { split: false, streams: [], labels: [] }
-  if (!info.split) return { split: false, streams: [0], labels: ['Audio'] }
-  const streams = Array.from({ length: info.streamCount - 1 }, (_, i) => i + 1)
-  return { split: true, streams, labels: streams.map((s) => info.labels[s] ?? `Track ${s}`) }
 }
 
 /**
@@ -289,14 +268,6 @@ function copyTargetPath(dir: string, base: string, ext: string): string {
   throw new Error(`Could not find available copy path for "${base}${ext}" (1000 collisions)`)
 }
 
-/** Stream-copy trim: no re-encode, so it's fast and lossless. */
-async function trimCopy(source: string, out: string, startSec: number, endSec: number): Promise<void> {
-  await ffmpegTo(
-    ['-ss', String(startSec), '-t', String(endSec - startSec), '-i', source, ...FFMPEG_MAP, '-c', 'copy', '-avoid_negative_ts', 'make_zero', '-movflags', '+faststart'],
-    out,
-  )
-}
-
 const RENAME_BACKOFF_MS = [100, 250, 500, 1000, 2000]
 
 /** Renames with retries, since a just-closed muxer can still hold a transient handle. */
@@ -318,71 +289,31 @@ async function renameWithRetry(from: string, to: string): Promise<void> {
   throw lastError ?? new Error('Rename failed')
 }
 
-/**
- * Re-encodes audio when per-track volumes were adjusted, keeping video as a copy.
- *
- * When tracks are split, each is normalized then mixed; otherwise only track 0's
- * volume is scaled and the rest pass through untouched.
- */
-async function trimWithAudioMix(
-  source: string,
-  out: string,
-  startSec: number,
-  endSec: number,
-  probeInfo: ProbeAudioInfo,
-  volumes: { stream: number; volume: number }[],
-): Promise<void> {
-  const volFor = (s: number) => volumes.find((v) => v.stream === s)?.volume ?? 1
-  const analysis = analyzeAudio(probeInfo)
-  const filters: string[] = []
-  const maps: string[] = ['-map', '0:v:0']
-  const codecs: string[] = ['-c:v', 'copy', '-c:a', 'aac', '-b:a', '160k']
-
-  if (probeInfo.split) {
-    for (const s of analysis.streams) filters.push(`[0:a:${s}]volume=${volFor(s)},asplit=2[t${s}][m${s}]`)
-    filters.push(`${analysis.streams.map((s) => `[m${s}]`).join('')}amix=inputs=${analysis.streams.length}:normalize=0[mix]`)
-    maps.push('-map', '[mix]', ...analysis.streams.flatMap((s) => ['-map', `[t${s}]`]))
-  } else {
-    filters.push(`[0:a:0]volume=${volFor(0)}[a0]`)
-    maps.push('-map', '[a0]')
-    for (let s = 1; s < probeInfo.streamCount; s++) {
-      maps.push('-map', `0:a:${s}`)
-      codecs.push(`-c:a:${s}`, 'copy')
-    }
-  }
-
-  const args = [
-    '-ss', String(startSec), '-noaccurate_seek', '-i', source,
-    ...maps,
-    ...codecs,
-    '-t', String(endSec - startSec),
-    ...(filters.length ? ['-filter_complex', filters.join(';')] : []),
-    '-avoid_negative_ts', 'make_zero',
-    '-movflags', '+faststart',
-  ]
-
-  await ffmpegTo(args, out)
-}
-
 export interface SaveClipRequest {
   clipPath: string
-  startSec: number
-  endSec: number
+  /**
+   * The edit, in output order: what the source keeps, and the gaps it holds.
+   *
+   * The same list the timeline drew, from @shared/cut.js, so the file and the
+   * picture cannot disagree about what was removed.
+   */
+  items: Item[]
   mode: 'overwrite' | 'copy'
-  trackVolumes?: { stream: number; volume: number }[]
+  trackVolumes?: StreamVolume[]
 }
 
 export interface SaveClipDeps {
-  getMainWindow: () => BrowserWindow | null
-  onCopied: (path: string, originalRecordedAt: number, source?: string | null) => void
+  onCopied: (path: string, originalRecordedAt: number, fromPath: string) => void
   onReplaced: (path: string, editedAt: number) => void
   getClipMeta: (p: string) => { recordedAt?: number; source?: string; audioTracks?: string[] } | null
-  getAudioTrackLabels: () => string[]
 }
 
 export async function saveClip(req: SaveClipRequest, deps: SaveClipDeps): Promise<string> {
   if (!fs.existsSync(req.clipPath)) throw new Error('Source clip not found')
-  if (req.endSec - req.startSec < 1) throw new Error('Trim range too short')
+  // The same rule the save buttons ran, from the same module: a save the editor
+  // showed as available cannot then be refused here for a different reason.
+  const allowed = canSave(req.items)
+  if (!allowed.ok) throw new Error(allowed.error)
 
   const dir = path.dirname(req.clipPath)
   const ext = path.extname(req.clipPath)
@@ -392,25 +323,8 @@ export async function saveClip(req: SaveClipRequest, deps: SaveClipDeps): Promis
   const meta = deps.getClipMeta(req.clipPath)
   const recordedAt = meta?.recordedAt ?? Date.now()
 
-  const volumes = req.trackVolumes ?? []
-  const needsAudioWork = volumes.some((v) => v.volume !== 1)
-
   try {
-    if (needsAudioWork) {
-      const info = await probe(req.clipPath)
-      const probeInfo: ProbeAudioInfo = {
-        streamCount: info?.streams.filter((s) => s.codec_type === 'audio').length ?? 0,
-        // Same rule the lanes were drawn with: a split must be honoured on save even
-        // when the clip has no recorded labels, or the volumes the user just dragged
-        // on lanes 2 and 3 would be silently dropped.
-        split: false,
-        labels: deps.getAudioTrackLabels(),
-      }
-      probeInfo.split = probeInfo.streamCount > 1
-      await trimWithAudioMix(req.clipPath, temp, req.startSec, req.endSec, probeInfo, volumes)
-    } else {
-      await trimCopy(req.clipPath, temp, req.startSec, req.endSec)
-    }
+    await writeSequence({ clipPath: req.clipPath, items: req.items, out: temp, volumes: req.trackVolumes })
   } catch (e) {
     if (fs.existsSync(temp)) {
       try {
@@ -425,8 +339,8 @@ export async function saveClip(req: SaveClipRequest, deps: SaveClipDeps): Promis
   if (req.mode === 'copy') {
     const target = copyTargetPath(dir, base, ext)
     await renameWithRetry(temp, target)
-    log.info(`Saved trimmed copy: ${target}`)
-    deps.onCopied(target, recordedAt, meta?.source)
+    log.info(`Saved edited copy: ${target}`)
+    deps.onCopied(target, recordedAt, req.clipPath)
     return target
   }
 

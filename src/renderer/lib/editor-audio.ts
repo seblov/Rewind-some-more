@@ -104,8 +104,8 @@ export function usePreviewAudio({
       for (const lane of graphRef.current?.lanes ?? []) lane.el.pause()
     }
     const onSeeked = () => syncTo(video.currentTime)
-    // A seek the video element made itself (the trim loop restarts from startSec)
-    // also arrives here, so the lanes follow the picture in every case.
+    // A seek the video element made itself (the playhead moving to the next piece at
+    // a seam) also arrives here, so the lanes follow the picture in every case.
     const onSeeking = () => syncTo(video.currentTime)
     const onTimeUpdate = () => {
       const g = graphRef.current

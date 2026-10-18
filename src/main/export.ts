@@ -25,8 +25,8 @@ export function cancelExport(): void {
 }
 
 const AUDIO_KBPS = 128
-/** Below this the video bitrate cannot express anything watchable. */
-const MIN_VIDEO_KBPS = 200
+/** Below this the video bitrate cannot express anything watchable. Shared with main/cut.ts. */
+export const MIN_VIDEO_KBPS = 200
 
 /**
  * The GPU H.264 encoders the bundled ffmpeg ships, in preference order, and the
@@ -57,7 +57,7 @@ async function probeEncoder(encoder: string): Promise<boolean> {
   }
 }
 
-async function detectGpuEncoder(): Promise<string | null> {
+export async function detectGpuEncoder(): Promise<string | null> {
   if (gpuEncoder !== undefined) return gpuEncoder
   gpuEncoder = null
   for (const encoder of GPU_ENCODERS) {
@@ -77,8 +77,12 @@ async function detectGpuEncoder(): Promise<string | null> {
  * `-preset pN` is NVENC-only, QSV speaks x264-style preset names, AMF uses
  * `-quality` — and every one of these is an OUTPUT option, so it must stay after
  * the input side of the seek.
+ *
+ * Shared with main/cut.ts, which re-encodes a cut the same way when the cut points
+ * are not on keyframes: one place decides which encoder this machine has and how it
+ * is asked for a bitrate.
  */
-function videoArgs(encoder: string | null, kbps: number): string[] {
+export function videoArgs(encoder: string | null, kbps: number): string[] {
   if (!encoder) {
     return ['-c:v', 'libx264', '-preset', 'veryfast', '-b:v', `${kbps}k`, '-threads', String(getSetting('exportThreads') || 0)]
   }

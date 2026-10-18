@@ -7,6 +7,8 @@
  * happened or a handler simply returned nothing.
  */
 
+import type { Item } from './cut.js'
+
 export type CaptureMode = 'display' | 'window' | 'game'
 
 /** Bindable actions the global keyboard hook can trigger. */
@@ -218,12 +220,16 @@ export interface ClipEditorInfo {
   audioTracks: ClipAudioTrack[]
   /** Source size in bytes; drives the compress savings estimate. */
   fileSize: number
+  /** Source geometry and frame rate: the timeline's x scale and its frame grid. */
+  width: number
+  height: number
+  fps: number
 }
 
 export interface SaveClipArgs {
   clipPath: string
-  startSec: number
-  endSec: number
+  /** The edit, in output order. See @shared/cut.js for the model. */
+  items: Item[]
   mode: 'overwrite' | 'copy'
   trackVolumes?: { stream: number; volume: number }[]
 }
