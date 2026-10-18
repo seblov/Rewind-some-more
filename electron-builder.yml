@@ -156,6 +156,6 @@ nsis:
 # latest.yml, which is the file the updater reads to learn a version exists.
 publish:
   provider: github
-  owner: bulhaa1
-  repo: Rewind
+  owner: seblov
+  repo: Rewind-some-more
   releaseType: release

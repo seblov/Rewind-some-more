@@ -2,7 +2,7 @@
 
 > **The story of Rewind** — why this project exists, the dispute that came with it, and how it ended: **[the story of Rewind](docs/the-story-of-rewind.md)**.
 
-> **Rewind is end of life.** Development has stopped, and 1.5.0 is the final release. The app keeps working as it is, and the source stays public under GPL-2.0-or-later — fork it and build on it. The update button no longer checks for anything.
+> **This is a fork of [bulhaa1/Rewind](https://github.com/bulhaa1/Rewind), whose development ended at 1.5.0.** Development continues here, and the app's update button reads this repository's releases.
 
 <img width="990" alt="Promo: the buffer dial fills under a spotlight, a keypress saves a clip into the rail, the editor trims and mixes, and the Rewind lockup closes the film" src="assets/preview/promo-teaser.gif" />
 
@@ -39,7 +39,7 @@ Rewind — Play. Capture. Keep.
 
 ## What's new in 1.5.0
 
-The final release. Rewind is end of life after this version — see the banner above.
+The last release from the original author; this fork continues from it.
 
 - **Encoder Preset** — Low / Balanced / Quality replaces the four-tier Visual Quality (CQP 28 / 23 / 16). Your saved setting and profiles migrate automatically.
 - **Screenshot editor** — click a screenshot to crop it and adjust brightness, contrast and saturation. Saving overwrites the original after a confirm; Revert crop restores the untouched image.
@@ -47,7 +47,7 @@ The final release. Rewind is end of life after this version — see the banner a
 - **Microphone picker fixes** — every input is listed by name, including what "Windows Default" resolves to, and a device is never captured twice.
 - **Fixed: quarter-screen recordings** on displays with scaling (200% and similar) — the capture is now fitted from the source's real frame size.
 - **Fixed:** a crash loop when the capture engine reinitialised mid-switch, and elevated games being dropped from capture.
-- **Removed:** the Discord button. The update panel no longer contacts the network — the app now makes no network request at all.
+- **Removed:** the Discord button.
 
 ## What's new in 1.4.1
 
@@ -123,9 +123,9 @@ the usual per-user places, and the in-app updater is off, because updating a por
 install a second one. To move up a version, download the new zip.
 
 Recording, editing and clips are all local files. Rewind contains no analytics,
-no telemetry and no crash reporting, and it makes no network request at all —
-since 1.5.0 even the manual update check is gone (see [Updating](#updating)).
-Nothing polls, nothing downloads anything, and nothing is ever uploaded.
+no telemetry and no crash reporting. Nothing polls, nothing downloads anything,
+and nothing is ever uploaded. The only request the app can make is the update
+check you trigger yourself (see [Updating](#updating)).
 
 **Windows x64 only.** There is no ARM or 32-bit build and no non-Windows build YET.
 
@@ -156,13 +156,23 @@ Clips, screenshots and the editor are all reachable from the tray menu.
 
 click a clip to open the editor in its own window:
 
-- **Trim** by dragging the in/out handles, or scroll the wheel over the trim bar to
-  scrub. The selection is what gets saved.
+- **Cut and delete.** `C` (or `Ctrl+K`) splits the clip at the playhead. Click a piece
+  to select it, then `Delete` takes it out and the sequence closes up behind it, or
+  `Shift+Delete` leaves black and silence in its place. Every cut is a step of its own:
+  keep cutting, and `Ctrl+Z` walks back through them.
+- **Trim** by dragging the handles at the two ends of the sequence, or scroll the wheel
+  over the timeline to scrub. Cut points snap to the piece edges and to the clip's
+  frames; `S` toggles snapping and the arrows step a frame (`Shift` steps a second).
 - **Mix the audio** — every track in the clip gets its own lane, its own waveform and
-  its own volume. Dragging a fader is heard live, and a fader at zero is the mute.
-- **Replace original** writes the trimmed range over the clip you opened;
+  its own volume. Dragging a fader is heard live, and a fader at zero is the mute. The
+  waveforms follow the cuts, so a lane ends where the picture does.
+- **Replace original** writes the sequence over the clip you opened;
   **Save a copy** writes it beside the clip as `name-edit.mp4`. The editor header
   shows the file name and its size on disk.
+- A cut that lands on the clip's keyframes is a stream copy, so it takes seconds and
+  loses nothing; a cut between them is re-encoded at the clip's own bitrate, and a gap
+  always is, because black has no packets to copy. Changed audio re-encodes on its own
+  and the picture stays a copy.
 
 **Compress** in the same window makes a smaller copy without touching the original.
 Pick **Low**, **Medium** or **High** — each is a fraction of the clip's own bitrate
@@ -178,11 +188,11 @@ so it can be pasted straight into a chat.
 
 ## Updating
 
-Rewind is end of life, and 1.5.0 is the last version. **The update button no longer
-checks for updates** — it explains that development has stopped and links to the
-source. The app makes no network request, ever: no check, no download, no install.
-If a new version ever appears on this repository's releases page, download it from
-there by hand.
+The update button checks this repository's releases for a newer version, and
+there is nothing else in the app that touches the network. A check happens only
+when you click, a download only after you confirm, and the installer only when
+you restart. Every release is also on the releases page if you would rather do
+it by hand.
 
 What your machine can encode, and what Rewind does when it cannot, is documented in
 [`docs/hardware-compatibility.md`](docs/hardware-compatibility.md) — including a
@@ -232,6 +242,7 @@ Verification, per area — each one runs the real path and reports what it measu
 
 ```bash
 npm run test:ui            # the panel regression suite (needs a running app on CDP 9222)
+npm run test:cut           # the cut/delete model and every writer path, on real ffmpeg
 npm run test:display       # the capture canvas follows the display, buffer live or paused
 npm run test:resolution    # a real display mode change, both directions (blanks the screen briefly)
 npm run test:profiles      # the four presets: tiers, write-through, pause preservation

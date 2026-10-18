@@ -6,7 +6,7 @@ import { ThemeButton } from './theme-button'
 import { UpdateButton } from './update-button'
 
 /** Where the titlebar's community links go. */
-const GITHUB_URL = 'https://github.com/bulhaa1/Rewind'
+const GITHUB_URL = 'https://github.com/seblov/Rewind-some-more'
 
 /**
  * The window's own bar.
