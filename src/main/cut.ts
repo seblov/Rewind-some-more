@@ -85,9 +85,9 @@ export interface WriteSequenceResult {
  * Keyframe timestamps of a file, in seconds, or null when they could not be read.
  *
  * One demux pass: `-skip_frame nokey` makes the decoder hand over keyframes only, so
- * every `pts_time` showinfo prints is a point a stream copy can land on. Nothing but
- * the keyframes themselves is decoded, which is what makes this affordable before
- * every cut instead of guessing at an interval.
+ * every `pts_time` showinfo prints is a point a stream copy can land on. This is the
+ * whole-file view, used by the cut test and for diagnostics; a save only needs the
+ * keyframes around its cut points, which {@link canCopyFrom} reads with a short seek.
  *
  * A failure is null, never an empty list: no keyframes means a copy cannot be shown
  * to be exact, and the caller re-encodes rather than returning a cut that still
@@ -127,6 +127,44 @@ export function probeKeyframes(file: string): Promise<number[] | null> {
 export function copyableStart(startSec: number, keyframes: number[]): boolean {
   if (startSec <= KEYFRAME_TOLERANCE_SEC) return true
   return keyframes.some((k) => startSec - k >= 0 && startSec - k <= KEYFRAME_TOLERANCE_SEC)
+}
+
+/**
+ * Whether a copy can start at `startSec`, read with one short seek instead of a demux
+ * of the whole file.
+ *
+ * `-ss` seeks to the keyframe at or before the tolerance window and discards up to
+ * it, so the first keyframe `-skip_frame nokey` prints is the first one at or after
+ * `start - tolerance`; `-copyts` keeps that time in the clip's own timeline. Feeding
+ * that one timestamp to {@link copyableStart} asks the same question the full scan
+ * answers, about the only keyframe that can decide it.
+ *
+ * A failed probe answers false, which re-encodes: a wrong yes would keep footage the
+ * user removed, while a wrong no only costs time.
+ */
+async function canCopyFrom(file: string, startSec: number): Promise<boolean> {
+  if (startSec <= KEYFRAME_TOLERANCE_SEC) return true
+  return new Promise((resolve) => {
+    execFile(
+      resolveFfmpeg(),
+      [
+        '-hide_banner',
+        '-ss', (startSec - KEYFRAME_TOLERANCE_SEC).toFixed(3),
+        '-skip_frame', 'nokey', '-copyts', '-i', file,
+        '-an', '-sn', '-vf', 'showinfo', '-frames:v', '1', '-f', 'null', 'NUL',
+      ],
+      { windowsHide: true, maxBuffer: 1024 * 1024, timeout: DEMUX_TIMEOUT_MS },
+      (err, _stdout, stderr) => {
+        const m = /pts_time:(-?[\d.]+)/.exec(String(stderr ?? ''))
+        const at = m ? Number(m[1]) : NaN
+        if (err || !Number.isFinite(at)) {
+          resolve(false)
+          return
+        }
+        resolve(copyableStart(startSec, [at]))
+      },
+    )
+  })
 }
 
 /**
@@ -446,13 +484,13 @@ async function concatCopies(
   let even = true
   for (let i = 0; i < kept.length; i++) {
     const part = path.join(scratchDir, `part-${String(i).padStart(3, '0')}${CUT_EXT}`)
-    // Parts are always MP4 whatever the output is: the concat demuxer wants one
-    // container, and `-c copy` into MP4 is a remux.
-    await ffmpegTo(
-      copyArgs(clipPath, kept[i], copyLengthSec(kept[i], pullbackSec, clipSec), audio, ['-movflags', '+faststart']),
-      part,
-    )
-    even = (await copiedFramesRunEven(part)) && even
+    // No `+faststart`: a part is only ever read by the concat demuxer, and moving
+    // the moov atom rewrites the whole part for a player that never sees it.
+    await ffmpegTo(copyArgs(clipPath, kept[i], copyLengthSec(kept[i], pullbackSec, clipSec), audio, []), part)
+    // Only a piece that stops short of the clip's end has a cut at its tail, and
+    // only that tail can land on a packet boundary that reorders frames. A piece
+    // that runs to the end has nothing to check.
+    if (kept[i].endSec < clipSec - 0.02) even = (await copiedFramesRunEven(part)) && even
     parts.push(part)
   }
 
@@ -511,10 +549,41 @@ export async function writeSequence(req: WriteSequenceRequest): Promise<WriteSeq
     labels: [],
   }
 
-  // A gap has no packets to copy, so it rules the copy path out before the keyframe
-  // scan is worth paying for.
-  const keyframes = gaps ? null : await probeKeyframes(req.clipPath)
-  let reencoded = !keyframes || !shape.kept.every((seg) => copyableStart(seg.startSec, keyframes))
+  /*
+   * A sequence that keeps the clip end to end is the clip. Copy the file itself:
+   * no keyframe scan, no remux, no encode. Cutting a clip and saving it without
+   * lifting anything out is a real edit in the model, but it changes no frame, so
+   * paying for a full re-encode there would be paying for nothing.
+   */
+  const kept = shape.kept
+  const wholeClip =
+    !gaps &&
+    !audioChanged &&
+    path.extname(req.out).toLowerCase() === path.extname(req.clipPath).toLowerCase() &&
+    kept[0].startSec <= 0.001 &&
+    kept.every((seg, i) => i === 0 || Math.abs(seg.startSec - kept[i - 1].endSec) <= 0.001) &&
+    kept[kept.length - 1].endSec >= info.durationSec - 0.02
+  if (wholeClip) {
+    // Async: the main process also serves the window's IPC, and a long recording is
+    // a second of blocking work if this is done on the calling thread.
+    await fs.promises.copyFile(req.clipPath, req.out)
+    const bytes = fs.statSync(req.out).size
+    log.info(`Kept every frame of ${path.basename(req.clipPath)}: copied the file`)
+    return { durationSec: info.durationSec, removedSec: 0, pieces: kept.length, gaps: 0, reencoded: false, bytes }
+  }
+
+  // A gap has no packets to copy. Otherwise each kept piece's start is checked on
+  // its own: one short seek per distinct cut point instead of a demux of the whole
+  // recording, which on a long clip or a slow drive is most of the wait.
+  let reencoded = gaps > 0
+  if (!reencoded) {
+    for (const start of new Set(shape.kept.map((seg) => seg.startSec))) {
+      if (!(await canCopyFrom(req.clipPath, start))) {
+        reencoded = true
+        break
+      }
+    }
+  }
   let encoder = reencoded ? await detectGpuEncoder() : null
   // The source's own overall bitrate, floored: re-encoding a cut should land on the
   // clip's quality, not on a size target, so the user gets back what they had.
@@ -558,7 +627,9 @@ export async function writeSequence(req: WriteSequenceRequest): Promise<WriteSeq
       if (shape.kept.length === 1) {
         const one = shape.kept[0]
         await ffmpegTo(copyArgs(req.clipPath, one, copyLengthSec(one, pullbackSec, info.durationSec), audio, muxTail), req.out)
-        return copiedFramesRunEven(req.out)
+        // A piece that runs to the clip's end has no cut at its tail, so its packets
+        // cannot reorder anything: there is nothing for the check to catch.
+        return one.endSec >= info.durationSec - 0.02 ? true : copiedFramesRunEven(req.out)
       }
       return concatCopies(req.clipPath, shape.kept, scratch!, req.out, pullbackSec, info.durationSec, audio, muxTail)
     }
