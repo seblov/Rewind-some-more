@@ -158,6 +158,39 @@ export function deleteItems(items: Item[], ids: number[], mode: 'ripple' | 'lift
   })
 }
 
+/**
+ * Removes the stretch between two output times and closes the sequence up.
+ *
+ * A range may start or end inside a piece, so both edges are split and the middle
+ * is dropped. The sliver rule applies at the edges: a surviving side shorter than
+ * {@link MIN_SEGMENT_SEC} is dropped with the range rather than written as a piece
+ * too short to watch, which can take a fraction of a frame more than was marked.
+ */
+export function removeRange(items: Item[], fromOut: number, toOut: number, fps: number, nextId: () => number): Item[] {
+  const from = snapToFrame(Math.min(fromOut, toOut), fps)
+  const to = snapToFrame(Math.max(fromOut, toOut), fps)
+  const out: Item[] = []
+  for (const span of layout(items).spans) {
+    const { item } = span
+    const overlapIn = Math.max(span.outIn, from)
+    const overlapOut = Math.min(span.outOut, to)
+    if (overlapOut <= overlapIn) {
+      out.push(item)
+      continue
+    }
+    const head = overlapIn - span.outIn
+    const tail = span.outOut - overlapOut
+    if (item.kind === 'gap') {
+      if (head >= MIN_SEGMENT_SEC) out.push({ id: nextId(), kind: 'gap', durSec: head })
+      if (tail >= MIN_SEGMENT_SEC) out.push({ id: nextId(), kind: 'gap', durSec: tail })
+    } else {
+      if (head >= MIN_SEGMENT_SEC) out.push({ id: nextId(), kind: 'keep', srcIn: item.srcIn, srcOut: item.srcIn + head })
+      if (tail >= MIN_SEGMENT_SEC) out.push({ id: nextId(), kind: 'keep', srcIn: item.srcOut - tail, srcOut: item.srcOut })
+    }
+  }
+  return out
+}
+
 /** Seconds the sequence keeps. */
 export function keptSec(items: Item[]): number {
   return items.reduce((total, item) => (item.kind === 'keep' ? total + (item.srcOut - item.srcIn) : total), 0)

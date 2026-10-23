@@ -1,5 +1,5 @@
 /**
- * Drives the cut/delete flow in the editor window: cut, a second cut refused on the
+ * Drives the split/cut-out flow in the editor window: split, a second split refused on the
  * seam, ripple delete, undo, a lift, and a real save.
  *
  * Run against the app on --remote-debugging-port=9222:
@@ -78,7 +78,7 @@ const run = (expr) => editor.evaluate(`(() => {\n${HELPERS}\nreturn (${expr})\n}
 const opened = await run(`({ pieces: pieces(), gaps: gapBlocks(), total: totalLabel() })`)
 check('the editor opens on one whole piece', opened.pieces === 1 && opened.gaps === 0, JSON.stringify(opened))
 
-// 1. Cut at 40%. The playhead must land on a real seam and split the piece in two.
+// 1. Split at 40%. The playhead must land on a real seam and split the piece in two.
 await run(`clickLaneAt(0.4)`)
 const at = await run(`timecode()`)
 await run(`key('KeyC')`)
@@ -87,17 +87,17 @@ const cut = await run(`({ pieces: pieces(), gaps: gapBlocks(), total: totalLabel
 check('C splits the piece at the playhead', cut.pieces === 2 && cut.gaps === 0, `${at} -> ${JSON.stringify(cut)}`)
 check('a cut does not change the length', cut.total === opened.total, `${opened.total} vs ${cut.total}`)
 
-// 2. A second cut on the same seam is refused, with the reason shown.
+// 2. A second split on the same seam is refused, with the reason shown.
 await run(`key('KeyC')`)
 await wait(300)
 const again = await run(`({ pieces: pieces(), notice: document.body.innerText.includes('Already cut here') })`)
 check('a cut on its own seam is refused, not snapped', again.pieces === 2, JSON.stringify(again))
 check('the refusal is shown on screen', again.notice === true)
 
-// 3. Select the second piece and ripple delete it: the sequence closes up.
+// 3. Select the second piece and cut it out: the sequence closes up.
 await run(`clickBlock(1)`)
-const armed = await run(`buttonByText('Delete').disabled === false && buttonByText('Lift').disabled === false`)
-check('selecting a piece arms Delete and Lift', armed === true)
+const armed = await run(`buttonByText('Cut out').disabled === false && buttonByText('Lift').disabled === false`)
+check('selecting a piece arms Cut out and Lift', armed === true)
 await run(`key('Delete')`)
 await wait(300)
 const removed = await run(`({ pieces: pieces(), gaps: gapBlocks(), total: totalLabel() })`)

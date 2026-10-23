@@ -12,6 +12,7 @@ import {
   MIN_SEGMENT_SEC,
   outAt,
   parseTimecode,
+  removeRange,
   snapToFrame,
   spanAtOut,
   splicePeaks,
@@ -102,11 +103,17 @@ function pct(seconds: number, duration: number): number {
   return (Math.max(0, Math.min(seconds, total)) / total) * 100
 }
 
+/** A marked range's length: tenths under a minute, so a short cut does not read as 0:00. */
+function rangeLabel(seconds: number): string {
+  return seconds < 60 ? `${seconds.toFixed(1)}s` : formatDuration(seconds)
+}
+
 /**
  * The clip editor.
  *
  * The edit is one ordered list of pieces -- what the clip still keeps, and the gaps
- * it holds -- with its own undo history. Cut splits the piece under the playhead,
+ * it holds -- with its own undo history. Dragging across the timeline marks a range
+ * and Cut out removes it in one step; Split divides the piece under the playhead,
  * Delete closes a piece up (or leaves a gap), and the file is written from that same
  * list. Waveform peaks are computed in the main process (ffmpeg decode) and rendered
  * as bars, which avoids shipping a waveform renderer and keeps memory bounded for
@@ -135,6 +142,8 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
   }))
   const { items, selected } = history.present
   const [currentSec, setCurrentSec] = useState(0)
+  /** The stretch dragged across the timeline, in output seconds. What Cut out removes. */
+  const [range, setRange] = useState<{ from: number; to: number } | null>(null)
   const [playing, setPlaying] = useState(false)
   // Kept apart from `loadError`: a preview that will not decode is not a reason to
   // throw away the loaded metadata and the edit the user has already made.
@@ -176,15 +185,26 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
 
   /** Writes a new edit and clears the redo tail, the way every editor does. */
   const commit = useCallback((next: Snapshot) => {
+    // An edit moves the sequence, so a range marked on the old one no longer means
+    // anything. Selection is part of the snapshot and survives or clears on its own.
+    setRange(null)
     setHistory((h) => ({ past: [...h.past.slice(-49), h.present], present: next, future: [] }))
   }, [])
 
   /** Selection changes are not edits: they do not land in the history. */
   const select = useCallback((ids: number[]) => {
+    if (ids.length > 0) setRange(null)
     setHistory((h) => ({ ...h, present: { ...h.present, selected: ids } }))
   }, [])
 
+  /** Marks a range, or clears it. A range and a piece selection are never both live. */
+  const pickRange = useCallback((next: { from: number; to: number } | null) => {
+    setRange(next)
+    if (next) setHistory((h) => ({ ...h, present: { ...h.present, selected: [] } }))
+  }, [])
+
   const undo = useCallback(() => {
+    setRange(null)
     setHistory((h) =>
       h.past.length === 0
         ? h
@@ -193,6 +213,7 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
   }, [])
 
   const redo = useCallback(() => {
+    setRange(null)
     setHistory((h) =>
       h.future.length === 0
         ? h
@@ -208,17 +229,19 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
    * no frame to show and the element stays where it is; the picture is held black
    * instead of jumping to the next piece.
    */
+  const seekIn = useCallback((nextSpans: Span[], nextDuration: number, outT: number) => {
+    // A seek is the user taking over: whatever gap was being held is over.
+    gapHold.current = null
+    const target = Math.max(0, Math.min(outT, nextDuration))
+    const src = srcAt(nextSpans, target)
+    const video = videoRef.current
+    if (video && src !== null) video.currentTime = src
+    setCurrentSec(target)
+  }, [])
+
   const seek = useCallback(
-    (outT: number) => {
-      // A seek is the user taking over: whatever gap was being held is over.
-      gapHold.current = null
-      const target = Math.max(0, Math.min(outT, shape.duration))
-      const src = srcAt(spans, target)
-      const video = videoRef.current
-      if (video && src !== null) video.currentTime = src
-      setCurrentSec(target)
-    },
-    [shape.duration, spans],
+    (outT: number) => seekIn(spans, shape.duration, outT),
+    [seekIn, shape.duration, spans],
   )
 
   /** Play/pause the element, picking up at the nearest piece when the playhead cannot play. */
@@ -473,6 +496,18 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
     commit({ items: cutAt(items, currentSec, fps, nextId), selected: [] })
   }, [target, items, currentSec, fps, nextId, commit])
 
+  /** Removes the marked range and closes the sequence up, the way Delete removes a piece. */
+  const cutOut = useCallback(() => {
+    if (!range) return
+    setCutNotice(null)
+    const next = removeRange(items, range.from, range.to, fps, nextId)
+    commit({ items: next, selected: [] })
+    // Land on the join, read from the sequence being written: the old layout still
+    // points at the first removed frame.
+    const after = layout(next)
+    seekIn(after.spans, after.duration, range.from)
+  }, [range, items, fps, nextId, commit, seekIn])
+
   const removeSelected = useCallback(
     (mode: 'ripple' | 'lift') => {
       if (selected.length === 0) return
@@ -490,9 +525,9 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
    * The editing keys, kept to the ones an NLE user already knows.
    *
    * All of them are ignored while a field has focus, so the timecode box can be typed
-   * in. Ctrl/Cmd+Z and Ctrl/Cmd+K follow Premiere and DaVinci; bare C is the cut, S
-   * toggles snapping, and Delete takes the selected piece out with the sequence
-   * closing up behind it (Shift+Delete leaves black in its place).
+   * in. Ctrl/Cmd+Z and Ctrl/Cmd+K follow Premiere and DaVinci; bare C is the split, S
+   * toggles snapping, and Delete takes the marked range or the selected piece out with
+   * the sequence closing up behind it (Shift+Delete leaves black in a piece's place).
    */
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -519,11 +554,17 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
       } else if (e.code === 'KeyS' && !mod) {
         setSnap((v) => !v)
       } else if (e.code === 'Delete' || e.code === 'Backspace') {
+        if (range) {
+          e.preventDefault()
+          cutOut()
+          return
+        }
         if (selected.length === 0) return
         e.preventDefault()
         removeSelected(e.shiftKey ? 'lift' : 'ripple')
       } else if (e.code === 'Escape') {
         select([])
+        pickRange(null)
       } else if (e.code === 'ArrowRight' || e.code === 'ArrowLeft') {
         e.preventDefault()
         seek(currentSec + (e.code === 'ArrowRight' ? 1 : -1) * (e.shiftKey ? 1 : frame))
@@ -537,11 +578,28 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [togglePlay, undo, redo, cut, reset, removeSelected, select, seek, currentSec, shape.duration, fps, selected.length])
+  }, [
+    togglePlay,
+    undo,
+    redo,
+    cut,
+    cutOut,
+    reset,
+    removeSelected,
+    select,
+    pickRange,
+    seek,
+    currentSec,
+    shape.duration,
+    fps,
+    selected.length,
+    range,
+  ])
 
   // A trim drag is one undo step, pushed when the drag ends rather than on every
   // mouse move: a hundred entries for one handle would make undo useless.
   const onTrimStart = useCallback(() => {
+    setRange(null)
     trimOrigin.current = history.present
   }, [history.present])
 
@@ -733,18 +791,22 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
               size="sm"
               disabled={!!saving || !!cutBlocked}
               onClick={cut}
-              title={cutBlocked ?? 'Split the clip at the playhead (C)'}
+              title={cutBlocked ?? 'Split the piece at the playhead (C)'}
             >
-              Cut
+              Split
             </Button>
             <Button
-              variant="secondary"
+              variant={range ? 'primary' : 'secondary'}
               size="sm"
-              disabled={!!saving || selected.length === 0}
-              onClick={() => removeSelected('ripple')}
-              title="Take the selected piece out and close the sequence up behind it (Delete)"
+              disabled={!!saving || (selected.length === 0 && !range)}
+              onClick={() => (range ? cutOut() : removeSelected('ripple'))}
+              title={
+                range
+                  ? `Remove the marked ${rangeLabel(range.to - range.from)} and close the gap (Delete)`
+                  : 'Take the selected piece out and close the sequence up behind it (Delete)'
+              }
             >
-              Delete
+              {range ? `Cut out ${rangeLabel(range.to - range.from)}` : 'Cut out'}
             </Button>
             <Button
               variant="secondary"
@@ -792,7 +854,11 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
             />
             <span className="text-[11px] text-ink-faint">/ {formatTimecode(shape.duration, fps)}</span>
             <span className="flex-1" />
-            {cutNotice ? <span className="text-[11px] text-ink-muted">{cutNotice}</span> : null}
+            {cutNotice ? (
+              <span className="text-[11px] text-ink-muted">{cutNotice}</span>
+            ) : !edited ? (
+              <span className="text-[11px] text-ink-faint">Drag across the timeline to mark footage, then Cut out</span>
+            ) : null}
           </div>
 
           <Timeline
@@ -801,9 +867,11 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
             currentSec={currentSec}
             fps={fps}
             selected={selected}
+            range={range}
             snap={snap}
             onSeek={seek}
             onSelect={select}
+            onRange={pickRange}
             onTrimStart={onTrimStart}
             onTrim={onTrim}
             onTrimEnd={onTrimEnd}
@@ -1123,9 +1191,11 @@ function Timeline({
   currentSec,
   fps,
   selected,
+  range,
   snap,
   onSeek,
   onSelect,
+  onRange,
   onTrimStart,
   onTrim,
   onTrimEnd,
@@ -1136,16 +1206,23 @@ function Timeline({
   currentSec: number
   fps: number
   selected: number[]
+  /** The stretch marked for Cut out, in output seconds. */
+  range: { from: number; to: number } | null
   snap: boolean
   onSeek: (outSec: number) => void
   onSelect: (ids: number[]) => void
+  onRange: (next: { from: number; to: number } | null) => void
   onTrimStart: () => void
   onTrim: (items: Item[]) => void
   onTrimEnd: () => void
 }) {
   const laneRef = useRef<HTMLDivElement>(null)
-  const [drag, setDrag] = useState<{ kind: 'playhead' } | { kind: 'head' } | { kind: 'tail' } | null>(null)
+  const [drag, setDrag] = useState<
+    { kind: 'playhead' } | { kind: 'head' } | { kind: 'tail' } | { kind: 'range'; anchor: number; at: number; startX: number } | null
+  >(null)
   const [hoverSec, setHoverSec] = useState<number | null>(null)
+  /** Set when a press turned into a drag, so the click that follows does not seek or select. */
+  const movedRef = useRef(false)
 
   const total = duration > 0 ? duration : 1
   const items = useMemo(() => shape.spans.map((s) => s.item), [shape])
@@ -1214,10 +1291,21 @@ function Timeline({
       const t = toSeconds(e.clientX)
       if (drag.kind === 'playhead') onSeek(Math.min(t, shape.duration))
       else if (drag.kind === 'head') trimHead(t)
-      else trimTail(t)
+      else if (drag.kind === 'tail') trimTail(t)
+      else {
+        // Five pixels is a click with a shaky hand, not a marked range.
+        if (Math.abs(e.clientX - drag.startX) > 5) movedRef.current = true
+        setDrag({ ...drag, at: Math.min(t, shape.duration) })
+      }
     }
     const onUp = () => {
-      if (drag.kind !== 'playhead') onTrimEnd()
+      if (drag.kind === 'range') {
+        const from = Math.min(drag.anchor, drag.at)
+        const to = Math.max(drag.anchor, drag.at)
+        onRange(movedRef.current && to - from >= MIN_SEGMENT_SEC ? { from, to } : null)
+      } else if (drag.kind !== 'playhead') {
+        onTrimEnd()
+      }
       setDrag(null)
     }
     window.addEventListener('mousemove', onMove)
@@ -1226,7 +1314,7 @@ function Timeline({
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
     }
-  }, [drag, toSeconds, shape.duration, onSeek, onTrimEnd, trimHead, trimTail])
+  }, [drag, toSeconds, shape.duration, onSeek, onTrimEnd, trimHead, trimTail, onRange])
 
   /*
    * Wheel scrub: scroll up rewinds, scroll down advances. The first notch lands
@@ -1317,7 +1405,11 @@ function Timeline({
   const playheadPct = pct(currentSec, total)
   const first = shape.spans[0]
   const last = shape.spans[shape.spans.length - 1]
-  const titled = 'Scroll to scrub · click to seek · click a piece to select · drag its edge to trim'
+  const titled = 'Scroll to scrub · click to seek · drag to mark a range · click a piece to select · drag its edge to trim'
+  const liveRange =
+    drag?.kind === 'range'
+      ? { from: Math.min(drag.anchor, drag.at), to: Math.max(drag.anchor, drag.at) }
+      : range
 
   return (
     <div className="flex flex-col">
@@ -1339,8 +1431,19 @@ function Timeline({
         aria-valuemax={Math.round(shape.duration)}
         aria-valuenow={Math.round(currentSec)}
         aria-valuetext={`${formatTimecode(currentSec, fps)} of ${formatTimecode(shape.duration, fps)}`}
+        onMouseDown={(e) => {
+          if (e.button !== 0) return
+          movedRef.current = false
+          const at = Math.min(toSeconds(e.clientX), shape.duration)
+          setDrag({ kind: 'range', anchor: at, at, startX: e.clientX })
+        }}
         onClick={(e) => {
+          if (movedRef.current) {
+            movedRef.current = false
+            return
+          }
           onSelect([])
+          onRange(null)
           onSeek(Math.min(toSeconds(e.clientX), shape.duration))
         }}
         onMouseMove={(e) => setHoverSec(toSeconds(e.clientX))}
@@ -1358,7 +1461,7 @@ function Timeline({
           else return
           e.preventDefault()
         }}
-        className="relative h-9 cursor-pointer rounded bg-raised/40"
+        className="relative h-9 cursor-pointer select-none rounded bg-raised/40"
       >
         {shape.spans.map((span) => {
           const item = span.item
@@ -1373,6 +1476,10 @@ function Timeline({
               data-testid={isGap ? 'timeline-gap' : 'timeline-piece'}
               onClick={(e) => {
                 e.stopPropagation()
+                if (movedRef.current) {
+                  movedRef.current = false
+                  return
+                }
                 // Shift extends: two pieces can be taken out in one delete.
                 if (e.shiftKey) {
                   onSelect(picked ? selected.filter((id) => id !== item.id) : [...selected, item.id])
@@ -1415,6 +1522,19 @@ function Timeline({
             </button>
           )
         })}
+
+        {/* What Cut out will take: the stretch the pointer marked, drawn over the pieces
+            so the selection reads against the footage it will remove. */}
+        {liveRange && liveRange.to - liveRange.from >= MIN_SEGMENT_SEC ? (
+          <div
+            data-testid="timeline-range"
+            className="pointer-events-none absolute inset-y-0 border-x-2 border-accent bg-accent/20"
+            style={{
+              left: `${pct(liveRange.from, total)}%`,
+              width: `${pct(liveRange.to - liveRange.from, total)}%`,
+            }}
+          />
+        ) : null}
 
         {/* The seams, drawn over the pieces: a tick where the source runs on, a dashed
             marker where it jumps. */}
