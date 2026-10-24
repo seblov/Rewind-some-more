@@ -8,7 +8,7 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const PORT = process.env.CDP_PORT || '9222'
 
@@ -32,7 +32,9 @@ export async function connect(urlIncludes) {
         )) ?? candidates[0]
   if (!page) throw new Error('No debuggable page found')
 
-  const ws = new WebSocket(page.webSocketDebuggerUrl)
+  // Node 22 exposes WebSocket globally; older versions need the optional probe dep.
+  const WebSocketImpl = globalThis.WebSocket ?? (await import('ws')).WebSocket
+  const ws = new WebSocketImpl(page.webSocketDebuggerUrl)
   let id = 0
   const pending = new Map()
 
@@ -103,7 +105,7 @@ const targetFilter = process.argv[3]
 // must not re-enter this block (that circular import hangs on the second load).
 const isCli = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 if (isCli && scriptPath) {
-  const mod = await import(`file://${process.cwd()}\\${scriptPath}`)
+  const mod = await import(pathToFileURL(path.resolve(process.cwd(), scriptPath)).href)
   const cdp = await connect(targetFilter)
   await mod.default(cdp)
   cdp.close()

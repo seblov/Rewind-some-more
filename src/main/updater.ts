@@ -46,6 +46,12 @@ export interface UpdateState {
  */
 const PORTABLE_FLAG = 'portable.flag'
 
+/**
+ * Linux packages have no published update feed yet, so the updater reports itself
+ * unavailable instead of downloading a Windows NSIS installer it cannot run.
+ */
+const UPDATES_SUPPORTED = process.platform === 'win32'
+
 export function isPortable(): boolean {
   try {
     return fs.existsSync(path.join(path.dirname(app.getPath('exe')), PORTABLE_FLAG))
@@ -54,7 +60,7 @@ export function isPortable(): boolean {
   }
 }
 
-let state: UpdateState = { supported: app.isPackaged && !isPortable(), status: 'idle' }
+let state: UpdateState = { supported: UPDATES_SUPPORTED && app.isPackaged && !isPortable(), status: 'idle' }
 let autoUpdater: typeof import('electron-updater').autoUpdater | null = null
 let onChange: (s: UpdateState) => void = () => {}
 
@@ -75,6 +81,7 @@ function set(patch: Partial<UpdateState>): void {
  * dependency is only required on the path that can actually use it.
  */
 function load(): typeof import('electron-updater').autoUpdater | null {
+  if (!UPDATES_SUPPORTED) return null
   if (!app.isPackaged) return null
   if (isPortable()) return null
   if (autoUpdater) return autoUpdater
@@ -150,7 +157,7 @@ export function consumeVersionChange(): string | null {
 export function initUpdater(send: (s: UpdateState) => void, updatedFrom: string | null = null): void {
   onChange = send
   state = {
-    supported: app.isPackaged && !isPortable(),
+    supported: UPDATES_SUPPORTED && app.isPackaged && !isPortable(),
     status: updatedFrom ? 'updated' : 'idle',
     version: updatedFrom ?? undefined,
     updatedFrom: updatedFrom ?? undefined,

@@ -16,7 +16,7 @@
  * video, not by hash: an encode is not bit-identical by nature.
  *
  * The module under test is the real main-process file, bundled with the same esbuild
- * configuration the app builds with (scripts/build-main.js). `electron` is stubbed:
+ * configuration the app builds with (scripts/build-main.mjs). `electron` is stubbed:
  * the cut path only asks it where the user-data folder is.
  */
 import assert from 'node:assert/strict'
@@ -80,7 +80,7 @@ async function loadCutModule() {
 
   const module = require('module')
   const originalLoad = module._load
-  const electron = { app: { isPackaged: false, getPath: () => path.join(work, 'userData') } }
+  const electron = { app: { isPackaged: false, getPath: () => path.join(work, 'userData'), getAppPath: () => root } }
   module._load = function (request, ...rest) {
     return request === 'electron' ? electron : originalLoad.call(this, request, ...rest)
   }

@@ -11,8 +11,8 @@
   "license": "GPL-2.0-or-later",
   "private": true,
   "scripts": {
-    "dev": "node scripts/dev.js",
-    "build:main": "node scripts/build-main.js",
+    "dev": "node scripts/dev.mjs",
+    "build:main": "node scripts/build-main.mjs",
     "build:renderer": "node node_modules/vite/bin/vite.js build",
     "build": "npm run build:main && npm run build:renderer",
     "start": "npm run build && node node_modules/electron/cli.js .",
@@ -24,6 +24,7 @@
     "typecheck": "node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json",
     "verify:channels": "node scripts/channel-check.mjs",
     "icons": "npm run icons:extract && npm run icons:sizes && node scripts/gen-ico.mjs && npm run icons:review",
+    "ffmpeg:linux": "node scripts/fetch-ffmpeg-linux.mjs",
     "icons:extract": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/logo-extract.ps1",
     "icons:sizes": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/logo-sizes.ps1",
     "icons:review": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/logo-contact-sheet.ps1",
@@ -39,7 +40,8 @@
     "test:cut": "node --test scripts/test-cut.mjs",
     "release": "npm run package && node node_modules/electron-builder/out/cli/cli.js --win nsis --prepackaged release/win-unpacked --publish always && node scripts/verify-exe.mjs",
     "release:portable": "node scripts/package-portable.mjs --publish",
-    "release:local": "npm run build && node node_modules/electron-builder/out/cli/cli.js --win --publish never && npm run package:stamp"
+    "release:local": "npm run build && node node_modules/electron-builder/out/cli/cli.js --win --publish never && npm run package:stamp",
+    "package:linux": "npm run build && npm run ffmpeg:linux && node node_modules/electron-builder/out/cli/cli.js --linux --publish never --config electron-builder-linux.yml"
   },
   "dependencies": {
     "@streamlabs/obs-studio-node": "https://s3-us-west-2.amazonaws.com/obsstudionodes3.streamlabs.com/osn-0.25.77-release-win64.tar.gz",
@@ -58,7 +60,7 @@
     "@fontsource-variable/orbitron": "^5.3.0",
     "@fontsource-variable/space-grotesk": "^5.3.0",
     "@fontsource/geist-mono": "^5.3.0",
-    "@tailwindcss/vite": "^4.1.14",
+    "@tailwindcss/vite": "4.1.14",
     "@tanstack/react-query": "^5.90.2",
     "@tanstack/react-virtual": "^3.14.0",
     "@types/node": "^22.10.2",
@@ -75,9 +77,10 @@
     "react-dom": "^18.3.1",
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.3.1",
-    "tailwindcss": "^4.1.14",
+    "tailwindcss": "4.1.14",
     "typescript": "^5.7.2",
-    "vite": "^6.0.7"
+    "vite": "^6.0.7",
+    "ws": "^8.22.0"
   },
   "repository": {
     "type": "git",

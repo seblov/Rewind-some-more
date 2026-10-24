@@ -20,7 +20,9 @@ const devUrl = 'http://localhost:5273'
 
 let viteProc = null
 if (!process.env.SKIP_VITE) {
-  const viteBin = require.resolve('vite/bin/vite.js')
+  // Vite's exports map does not expose bin/vite.js, so resolve it from the package
+  // root the same way the build script does.
+  const viteBin = path.join(projectRoot, 'node_modules', 'vite', 'bin', 'vite.js')
   viteProc = spawn(process.execPath, [viteBin], {
     stdio: 'inherit',
     cwd: projectRoot,
@@ -30,7 +32,7 @@ if (!process.env.SKIP_VITE) {
   await new Promise((r) => setTimeout(r, 2500))
 }
 
-await run(process.execPath, [require.resolve('scripts/build-main.js')])
+await run(process.execPath, [path.join(projectRoot, 'scripts', 'build-main.mjs')])
 
 const electronBin = require('electron')
 const child = spawn(electronBin, ['.'], {

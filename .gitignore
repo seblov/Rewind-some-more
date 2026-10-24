@@ -38,3 +38,5 @@ PRODUCT.md
 # carries local paths that must never be published.
 AGENTS.md
 release-verify/
+# Linux capture ffmpeg, fetched by `npm run ffmpeg:linux` (~170MB)
+vendor/linux/ffmpeg

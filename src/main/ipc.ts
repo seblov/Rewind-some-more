@@ -25,8 +25,8 @@ import { getClipMeta, setClipMeta, getScreenshotMeta, setScreenshotMeta, deleteS
 import { captureScreenshot } from './ffmpeg.js'
 import { isInside, isWritable, nonEmptyString } from './util.js'
 import type { Profile } from '@shared/types.js'
-import { defaultOutputPath, rewindRoot } from './obs-core.js'
-import { channelLevel, deviceAvailable, listAudioApps, listDevices, channelDevices } from './audio.js'
+import { rewindRoot } from './obs-core.js'
+import { channelLevel, channelDevices } from './audio-state.js'
 import type {
   AudioChannel,
   BufferStatus,
@@ -401,10 +401,11 @@ export function registerIpc(s: Services): void {
     )
   })
 
-  handle(IPC.getWindows, () => {
+  handle(IPC.getWindows, async () => {
     if (!obsCore().isInitialized() || !capture) return ok([])
     try {
-      return ok(capture().refreshWindowList().map((w: any) => ({ id: w.value, name: w.name })))
+      const list = await (capture().refreshWindowListAsync?.() ?? capture().refreshWindowList())
+      return ok(list.map((w: any) => ({ id: w.value, name: w.name })))
     } catch (e) {
       log.error('Failed to get windows:', e)
       return ok([])
@@ -441,7 +442,7 @@ export function registerIpc(s: Services): void {
     if (blocked) return blocked
     try {
       return await withStatus(OBS_STATUS_MESSAGES.changingSource, async () => {
-        const windows = capture().refreshWindowList()
+        const windows = await (capture().refreshWindowListAsync?.() ?? capture().refreshWindowList())
         await capture().setWindow(windowId)
         const store = require('./store.js')
         store.setSetting('captureMode', 'window')
@@ -896,7 +897,6 @@ export function registerIpc(s: Services): void {
   // -------------------------------------------------------------------------
 
   handle(IPC.getAudioLevels, () => {
-    const { channelLevel } = require('./audio.js')
     return ok({ desktop: channelLevel('desktop'), microphone: channelLevel('microphone') })
   })
 
@@ -965,7 +965,7 @@ export function registerIpc(s: Services): void {
    * hardcoded false -- so every fader in Settings > Audio rendered disabled, with
    * the "can't be captured individually" tooltip, for every app.
    */
-  handle(IPC.getAudioSessions, () => ok(audioMix()?.getApps?.() ?? require('./audio.js').listAudioApps()))
+  handle(IPC.getAudioSessions, () => ok(audioMix()?.getApps?.() ?? []))
 
   handle(IPC.setAppVolume, (exe: unknown, volume: unknown) => {
     if (typeof exe !== 'string' || exe.length === 0) return fail('Invalid app identifier')
@@ -1028,16 +1028,19 @@ export function registerIpc(s: Services): void {
 
   handle(IPC.getAudioDevices, () => ok(audioDevices().getDevices()))
 
-  handle(IPC.getChannelDevices, () => ok(require('./audio.js').channelDevices()))
+  handle(IPC.getChannelDevices, () => ok(channelDevices()))
 
-  handle(IPC.setChannelDevice, (channel: unknown, deviceId: unknown) => {
+  handle(IPC.setChannelDevice, async (channel: unknown, deviceId: unknown) => {
     if (!isChannel(channel)) return fail('Invalid audio channel')
     if (typeof deviceId !== 'string' || deviceId.length === 0 || deviceId.length >= 500) {
       return fail('Invalid audio device id')
     }
     if (obsCore().isInitialized()) {
       const kind: DeviceKind = channel === 'desktop' ? 'output' : 'input'
-      if (!require('./audio.js').deviceAvailable(obsCore().obs, deviceId, kind)) {
+      const available = obsCore().deviceAvailable
+        ? await obsCore().deviceAvailable(deviceId, kind)
+        : require('./audio.js').deviceAvailable(obsCore().obs, deviceId, kind)
+      if (!available) {
         return fail('That audio device is no longer available')
       }
     }

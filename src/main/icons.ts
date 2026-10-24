@@ -20,11 +20,14 @@ import fs from 'node:fs'
  */
 let cachedPath: string | null = null
 
-/** Absolute path to the .ico, preferring the packaged location. */
+/** Absolute path to the app icon, preferring the packaged location. */
 export function resolveIconPath(): string {
   if (cachedPath) return cachedPath
-  const packaged = path.join(process.resourcesPath, 'favicon.ico')
-  const dev = path.join(__dirname, '../../assets/favicon.ico')
+  // X11 trays and Linux window managers do not read .ico files. Every other
+  // platform keeps the icon the Windows build already shipped.
+  const file = process.platform === 'linux' ? 'icon-256.png' : 'favicon.ico'
+  const packaged = path.join(process.resourcesPath, file)
+  const dev = path.join(__dirname, '../../assets', process.platform === 'linux' ? 'icon/icon-256.png' : file)
   cachedPath = app.isPackaged ? packaged : dev
 
   // If the packaged copy is somehow missing, say so rather than returning a path

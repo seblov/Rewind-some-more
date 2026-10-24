@@ -48,7 +48,7 @@ async function probeEncoder(encoder: string): Promise<boolean> {
   try {
     await execFileP(
       resolveFfmpeg(),
-      ['-hide_banner', '-v', 'error', '-f', 'lavfi', '-i', 'color=black:s=256x256:d=0.1', '-c:v', encoder, '-frames:v', '1', '-f', 'null', 'NUL'],
+      ['-hide_banner', '-v', 'error', '-f', 'lavfi', '-i', 'color=black:s=256x256:d=0.1', '-c:v', encoder, '-frames:v', '1', '-f', 'null', '-'],
       { windowsHide: true, timeout: 5000 },
     )
     return true
@@ -179,7 +179,7 @@ async function runExport(
       const passlog = path.join(passDir, 'pass')
       try {
         await runFfmpeg(
-          [...inputThreads, ...seek, ...vArgs, ...progress, '-an', '-pass', '1', '-passlogfile', passlog, '-f', 'null', 'NUL'],
+          [...inputThreads, ...seek, ...vArgs, ...progress, '-an', '-pass', '1', '-passlogfile', passlog, '-f', 'null', '-'],
           signal,
           report((p) => p * 0.4),
         ).promise

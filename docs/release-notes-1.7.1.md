@@ -1,6 +1,25 @@
 # Rewind 1.7.1
 
-Windows x64 only. No ARM, no 32-bit, no Linux or macOS build.
+**Now available for Linux as well.** Windows x64 and Linux x64. There is no ARM or
+32-bit build, and no macOS build.
+
+## Linux
+
+`Rewind-1.7.1-x86_64.AppImage` is the first Linux build. It uses ffmpeg and
+PulseAudio rather than the OBS engine the Windows app ships.
+
+- X11 desktops only. Wayland needs the PipeWire portal and is not supported yet.
+- Requires `pactl` (PulseAudio or PipeWire) and `wmctrl`.
+- Software x264 encoding. Hardware NVENC, AMF and QSV are not used.
+- In-app updates are off on Linux.
+
+What works: display and window capture, the rolling replay buffer, quick clips,
+continuous recording, screenshots, the clip library, the editor (trim, cut,
+reorder, waveforms, per-track volume), compression and sized exports, profiles,
+hotkeys, and per-app faders.
+
+Save the AppImage, make it executable with `chmod +x`, and run it. The first
+launch creates the library in `~/Videos/Rewind`.
 
 ## What's new since 1.7.0
 
@@ -22,8 +41,9 @@ Also in this build:
 
 ## Assets
 
-- `Rewind-1.7.1-setup.exe`, per-user installer, no admin required.
+- `Rewind-1.7.1-x86_64.AppImage`, the Linux build. X11, x86-64.
+- `Rewind-1.7.1-setup.exe`, per-user Windows installer, no admin required.
 - `Rewind-1.7.1-setup.exe.blockmap`, required for in-app updates.
-- `latest.yml`, the update feed the app reads. Required for in-app updates.
+- `latest.yml`, the Windows update feed. Required for in-app updates.
 - `Rewind-1.7.1-portable.zip`, unpack anywhere and run `Rewind.exe`. No installer,
   no registry entry, and the in-app updater is off.

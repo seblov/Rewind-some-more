@@ -15,6 +15,7 @@ import { APP_FOLDER, MONITOR_LOG_INTERVAL_MS, OBS_SOURCE_NAMES, TIMING } from '@
 import { writeProfileVideoSettings } from './obs-profile.js'
 import { bindChildren, killChildren, OBS_EXE } from './process-lifetime.js'
 import { getSetting } from './store.js'
+import type { DeviceKind } from '@shared/types.js'
 
 const log = scope('OBS')
 
@@ -496,6 +497,11 @@ export class ObsCore {
     // Lazy: audio.ts imports from this module, so a static import back would be
     // circular. Same pattern the rest of the main process uses for audio.
     return require('./audio.js').deviceAvailable(this.obs, getSetting('micDeviceId'), 'microphone')
+  }
+
+  /** Whether a stored endpoint still exists, used by the settings UI before binding it. */
+  deviceAvailable(id: string, kind: DeviceKind): boolean {
+    return require('./audio.js').deviceAvailable(this.obs, id, kind)
   }
 
   audioTrackLabels(): string[] {

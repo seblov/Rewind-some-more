@@ -1,0 +1,63 @@
+# Linux packaging.
+#
+# Separate from electron-builder.yml on purpose: that file ships a Windows OBS
+# runtime, a Windows ffmpeg and an NSIS installer that mean nothing here. The
+# Linux build carries the ffmpeg fetched by `npm run ffmpeg:linux`, which has the
+# PulseAudio and x11grab inputs the recorder reads.
+appId: app.rewind.desktop
+productName: Rewind
+copyright: Rewind
+
+directories:
+  output: release
+  buildResources: assets
+
+asar: true
+compression: maximum
+
+electronLanguages:
+  - en-US
+
+npmRebuild: false
+
+asarUnpack:
+  - node_modules/koffi/**
+  - node_modules/@koromix/**
+  - node_modules/uiohook-napi/**
+
+files:
+  - out/**/*
+  - package.json
+  - '!**/*.map'
+  # Windows-only capture stack and the Windows ffmpeg. The Linux capture binary is
+  # a resource below; shipping these would add ~700MB nothing loads.
+  - '!node_modules/@streamlabs/obs-studio-node/**'
+  - '!node_modules/native-sound-mixer/**'
+  - '!node_modules/get-windows/**'
+  - '!node_modules/ffmpeg-static/**'
+  - '!node_modules/ffprobe-static/**'
+
+extraResources:
+  # `resolveFfmpeg()` reads this in a packaged build.
+  - from: vendor/linux/ffmpeg
+    to: ffmpeg/ffmpeg
+  # `resolveIconPath()` reads this for the window and the tray.
+  - from: assets/icon/icon-256.png
+    to: icon-256.png
+
+linux:
+  target:
+    - target: AppImage
+      arch:
+        - x64
+  artifactName: ${productName}-${version}-${arch}.${ext}
+  category: AudioVideo
+  icon: assets/icon/icon-256.png
+  synopsis: Save the last minute of your screen
+  description: A local-first replay buffer, clip library and editor for Linux.
+  desktop:
+    entry:
+      Name: Rewind
+      Comment: Save the last minute of your screen
+      Categories: AudioVideo;Recorder;
+      Keywords: capture;replay;clip;record;screen;

@@ -3,6 +3,7 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { app } from 'electron'
 import { scope } from './logger.js'
+import { listMonitors, x11Display } from './linux/x11.js'
 import { screenshotFileName } from '@shared/constants.js'
 
 const log = scope('Ffmpeg')
@@ -31,11 +32,37 @@ let ffmpegPath: string | null = null
 /** Packaged builds ship the static binary in resources; dev falls back to the npm package. */
 export function resolveFfmpeg(): string {
   if (ffmpegPath) return ffmpegPath
-  const resolved = app.isPackaged
-    ? path.join(process.resourcesPath, 'ffmpeg', 'ffmpeg.exe')
-    : (require('ffmpeg-static') as unknown as string)
-  ffmpegPath = resolved
-  return resolved
+  const binary = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'
+
+  // An explicit override wins everywhere, which is how a distribution package
+  // points at its own build.
+  const override = process.env.REWIND_FFMPEG
+  if (override && fs.existsSync(override)) {
+    ffmpegPath = override
+    return override
+  }
+
+  if (app.isPackaged) {
+    ffmpegPath = path.join(process.resourcesPath, 'ffmpeg', binary)
+    return ffmpegPath
+  }
+
+  // Linux needs a build with libpulse and x11grab; ffmpeg-static has the latter
+  // but not the former, so audio capture would silently be impossible. `npm run
+  // ffmpeg:linux` puts the right build here.
+  if (process.platform === 'linux') {
+    // Test harnesses stub `electron` with only the members they use, and some have
+    // no getAppPath. The repo root is the same answer there.
+    const appPath = typeof app.getAppPath === 'function' ? app.getAppPath() : process.cwd()
+    const vendored = path.join(appPath, 'vendor', 'linux', 'ffmpeg')
+    if (fs.existsSync(vendored)) {
+      ffmpegPath = vendored
+      return vendored
+    }
+  }
+
+  ffmpegPath = (require('ffmpeg-static') as unknown as string | null) ?? 'ffmpeg'
+  return ffmpegPath
 }
 export class CancelledError extends Error {
   constructor() {
@@ -272,7 +299,7 @@ export function measureStreamVolume(file: string, audioIndex: number): Promise<S
   return new Promise((resolve) => {
     execFile(
       resolveFfmpeg(),
-      ['-hide_banner', '-nostats', '-i', file, '-map', `0:a:${audioIndex}`, '-af', 'volumedetect', '-f', 'null', 'NUL'],
+      ['-hide_banner', '-nostats', '-i', file, '-map', `0:a:${audioIndex}`, '-af', 'volumedetect', '-f', 'null', '-'],
       { windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
       (err, stdout, stderr) => {
         const text = `${stdout ?? ''}\n${stderr ?? ''}`
@@ -448,25 +475,8 @@ export async function probeClip(file: string): Promise<ClipProbe | null> {
 export async function captureScreenshot(displayIndex: number, dir: string): Promise<string> {
   fs.mkdirSync(dir, { recursive: true })
 
-  const attempts: { label: string; args: string[] }[] = [
-    {
-      label: 'gdigrab',
-      args: [
-        '-hide_banner', '-loglevel', 'error', '-y',
-        '-f', 'gdigrab', '-framerate', '5', '-i', 'desktop',
-        '-frames:v', '1',
-      ],
-    },
-    {
-      label: 'ddagrab',
-      args: [
-        '-hide_banner', '-loglevel', 'error', '-y',
-        '-init_hw_device', 'd3d11va',
-        '-filter_complex', `ddagrab=output_idx=${displayIndex}:draw_mouse=0,hwdownload,format=bgra`,
-        '-frames:v', '1',
-      ],
-    },
-  ]
+  const attempts: { label: string; args: string[] }[] =
+    process.platform === 'linux' ? linuxScreenshotAttempts(displayIndex) : windowsScreenshotAttempts(displayIndex)
 
   const errors: string[] = []
 
@@ -489,6 +499,51 @@ export async function captureScreenshot(displayIndex: number, dir: string): Prom
   }
 
   throw new Error(`Could not capture screenshot (${errors.join('; ')})`)
+}
+
+/** X11 grabs the monitor region the capture backend draws from. */
+function linuxScreenshotAttempts(displayIndex: number): { label: string; args: string[] }[] {
+  const monitors = listMonitors()
+  const monitor = monitors[displayIndex] ?? monitors[0]
+  if (!monitor) return []
+  const display = x11Display()
+  return [
+    {
+      label: 'x11grab',
+      args: [
+        '-hide_banner', '-loglevel', 'error', '-y',
+        '-f', 'x11grab',
+        '-video_size', `${monitor.width}x${monitor.height}`,
+        '-framerate', '5',
+        '-grab_x', String(monitor.x),
+        '-grab_y', String(monitor.y),
+        '-i', display,
+        '-frames:v', '1',
+      ],
+    },
+  ]
+}
+
+function windowsScreenshotAttempts(displayIndex: number): { label: string; args: string[] }[] {
+  return [
+    {
+      label: 'gdigrab',
+      args: [
+        '-hide_banner', '-loglevel', 'error', '-y',
+        '-f', 'gdigrab', '-framerate', '5', '-i', 'desktop',
+        '-frames:v', '1',
+      ],
+    },
+    {
+      label: 'ddagrab',
+      args: [
+        '-hide_banner', '-loglevel', 'error', '-y',
+        '-init_hw_device', 'd3d11va',
+        '-filter_complex', `ddagrab=output_idx=${displayIndex}:draw_mouse=0,hwdownload,format=bgra`,
+        '-frames:v', '1',
+      ],
+    },
+  ]
 }
 
 function withTimeout(ms: number): AbortSignal {

@@ -3,6 +3,7 @@ import { Mutex } from './obs-bind.js'
 import { createAudioSource, applyGain, destroyAudioSource, setSourceTrack, describeAudioSource } from './obs-core.js'
 import type { ObsModule } from './obs-bind.js'
 import { getSetting, setSetting } from './store.js'
+import { channelDevices, channelLevel } from './audio-state.js'
 import {
   APP_AUDIO_WATCH_MS,
   APP_PROBE_TTL_MS,
@@ -44,18 +45,7 @@ const CHANNEL_SETTING: Record<AudioChannel, 'desktopDeviceId' | 'micDeviceId'> =
   microphone: 'micDeviceId',
 }
 
-export function channelDevices(): Record<AudioChannel, string> {
-  return {
-    desktop: getSetting('desktopDeviceId'),
-    microphone: getSetting('micDeviceId'),
-  }
-}
-
-export function channelLevel(channel: AudioChannel): { volume: number; muted: boolean } {
-  return channel === 'desktop'
-    ? { volume: getSetting('desktopVolume'), muted: getSetting('desktopMuted') }
-    : { volume: getSetting('micVolume'), muted: getSetting('micMuted') }
-}
+export { channelDevices, channelLevel } from './audio-state.js'
 
 // ---------------------------------------------------------------------------
 // WASAPI endpoint enumeration

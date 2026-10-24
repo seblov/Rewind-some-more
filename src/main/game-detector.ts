@@ -38,15 +38,20 @@ export const EXCLUDED_PROCESSES = new Set([
   'claude', 'codex', 'opencode', 'openchamber', 'windsurf', 'kiro', 'trae',
   'chatgpt', 'mscopilot', 'copilotapp', 'perplexity', 'lmstudio', 'ollama',
 
-  // Terminals and shells
+  // Terminals and shells. The Linux names matter too: a maximized terminal is
+  // geometrically identical to a fullscreen game.
   'windowsterminal', 'powershell', 'pwsh', 'cmd', 'conhost',
+  'gnome-terminal', 'gnome-terminal-server', 'konsole', 'xterm', 'alacritty',
+  'kitty', 'wezterm', 'tilix', 'terminator', 'foot', 'ghostty',
 
   // Communication
   'discord', 'goofcord', 'spotify', 'slack', 'teams', 'zoom', 'telegram', 'signal',
   'whatsapp', 'skype',
 
-  // Media players
+  // Media players. `stremio` and the GNOME players are fullscreen video windows,
+  // which the geometry test cannot tell from a game.
   'vlc', 'mpc-hc', 'mpc-hc64', 'mpv', 'wmplayer', 'potplayer', 'potplayermini64', 'foobar2000',
+  'stremio', 'celluloid', 'totem', 'smplayer', 'haruna',
 
   /*
    * Performance overlays. These are the strongest case for exclusion: RTSS and
@@ -61,6 +66,8 @@ export const EXCLUDED_PROCESSES = new Set([
 
   // Shell and system
   'explorer', 'dwm', 'shellexperiencehost', 'searchhost',
+  'gnome-shell', 'plasmashell', 'kwin_x11', 'kwin_wayland', 'mutter', 'nautilus',
+  'dolphin', 'thunar', 'nemo', 'pcmanfm', 'xfdesktop',
   'systemsettings', 'applicationframehost', 'textinputhost', 'lockapp',
   'startmenuexperiencehost', 'searchui', 'cortana', 'taskmgr', 'snippingtool', 'widgets',
   'lightshot',

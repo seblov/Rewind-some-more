@@ -97,7 +97,7 @@ export function probeKeyframes(file: string): Promise<number[] | null> {
   return new Promise((resolve) => {
     execFile(
       resolveFfmpeg(),
-      ['-hide_banner', '-skip_frame', 'nokey', '-i', file, '-an', '-sn', '-vf', 'showinfo', '-f', 'null', 'NUL'],
+      ['-hide_banner', '-skip_frame', 'nokey', '-i', file, '-an', '-sn', '-vf', 'showinfo', '-f', 'null', '-'],
       { windowsHide: true, maxBuffer: 8 * 1024 * 1024, timeout: DEMUX_TIMEOUT_MS },
       (err, _stdout, stderr) => {
         const times: number[] = []
@@ -151,7 +151,7 @@ async function canCopyFrom(file: string, startSec: number): Promise<boolean> {
         '-hide_banner',
         '-ss', (startSec - KEYFRAME_TOLERANCE_SEC).toFixed(3),
         '-skip_frame', 'nokey', '-copyts', '-i', file,
-        '-an', '-sn', '-vf', 'showinfo', '-frames:v', '1', '-f', 'null', 'NUL',
+        '-an', '-sn', '-vf', 'showinfo', '-frames:v', '1', '-f', 'null', '-',
       ],
       { windowsHide: true, maxBuffer: 1024 * 1024, timeout: DEMUX_TIMEOUT_MS },
       (err, _stdout, stderr) => {
@@ -271,7 +271,6 @@ function copyArgs(
       // three-track clip arrives with its Desktop and Microphone lanes missing.
       '-map', '0',
       '-c', 'copy',
-      '-avoid_negative_ts', 'make_zero',
       ...muxTail,
     ]
   }
@@ -281,7 +280,6 @@ function copyArgs(
     '-c:v', 'copy',
     ...audio.codecs,
     '-filter_complex', audio.filters.join(';'),
-    '-avoid_negative_ts', 'make_zero',
     ...muxTail,
   ]
 }
@@ -494,6 +492,11 @@ async function concatCopies(
     parts.push(part)
   }
 
+  // The timeline length of everything kept. Used as an explicit output ceiling:
+  // `-shortest` is unreliable with stream copy, and an audio packet that ran past
+  // the last video frame otherwise makes the joined audio read a second longer.
+  const outputSec = kept.reduce((sum, piece) => sum + Math.max(0, piece.endSec - piece.startSec), 0)
+
   const listFile = path.join(scratchDir, 'parts.txt')
   // Written without a BOM: the concat demuxer reads this file literally and a BOM
   // makes it reject the first line.
@@ -505,7 +508,13 @@ async function concatCopies(
       // Same reason as the pieces: default mapping takes one audio stream out of a
       // clip that carries several.
       '-map', '0',
-      '-c', 'copy',
+      // Video stays a copy; audio is re-encoded so the join can be cut to the
+      // timeline's exact length. With a stream copy the last AAC packet overruns
+      // the last video frame and the joined audio reads a second longer.
+      '-c:v', 'copy',
+      '-c:a', 'aac',
+      '-b:a', `${AUDIO_KBPS}k`,
+      '-t', outputSec.toFixed(3),
       ...muxTail,
     ],
     out,

@@ -127,7 +127,57 @@ no telemetry and no crash reporting. Nothing polls, nothing downloads anything,
 and nothing is ever uploaded. The only request the app can make is the update
 check you trigger yourself (see [Updating](#updating)).
 
-**Windows x64 only.** There is no ARM or 32-bit build and no non-Windows build YET.
+**Windows x64 and Linux x64.** There is no ARM or 32-bit build. The Linux build is
+new and has its own requirements; see below.
+
+### Linux
+
+Rewind runs on X11 desktops with PulseAudio or PipeWire. The capture engine is
+ffmpeg, not OBS, because the Streamlabs OBS build the Windows app uses has no
+Linux release.
+
+Requirements:
+
+- x86-64 Linux with an X11 session. Wayland is not supported yet.
+- `pactl` (from `pulseaudio-utils` or `pipewire-pulse`) and `wmctrl`.
+- `libXtst` and `libxkbcommon` for the global hotkeys; every mainstream desktop
+  already has them.
+
+Run it from source:
+
+```sh
+npm install
+npm run ffmpeg:linux   # ~170 MB: the Linux ffmpeg with PulseAudio and x11grab
+npm run dev
+```
+
+Build the AppImage:
+
+```sh
+npm run package:linux
+# release/Rewind-<version>-x86_64.AppImage
+```
+
+`npm run ffmpeg:linux` is required once per checkout. Without it the app falls
+back to the `ffmpeg-static` binary, which cannot read Pulse sources, and clips
+would have no audio.
+
+What works on Linux: display and window capture, the rolling replay buffer,
+quick clips, continuous recording, screenshots, the clip library, the editor
+(trim, cut, reorder, waveforms, per-track volume), compression and sized exports,
+profiles, hotkeys, and per-app faders. Auto-detect follows a fullscreen window to
+its monitor and names the clip after its process.
+
+Differences from Windows:
+
+- No game-hook capture. Auto-detect switches the display capture, not a hooked
+  game process.
+- Per-app faders set that app's PulseAudio stream level, so they also change what
+  you hear. There is no per-app loopback capture outside the desktop portal.
+- Hardware encoders are not used. The bundled build has x264, which is CPU only;
+  the quality presets map to x264 presets and CRF, not NVENC/AMF/QSV.
+- In-app updates are disabled until a Linux release feed exists.
+- Screenshots capture the selected display, not the selected window.
 
 ## Using it
 

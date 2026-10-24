@@ -5,11 +5,16 @@ import path from 'node:path'
 import { scope } from './logger.js'
 import { bootstrap, getMainWindow, lifecycle, PRELOAD, RENDERER_DIR, showMainWindow } from './window.js'
 import { log as logger } from './logger.js'
-import { ObsCore, defaultOutputPath, rewindRoot, killObsChildren } from './obs-core.js'
+import { ObsCore, rewindRoot, killObsChildren } from './obs-core.js'
 import { ReplayBuffer } from './replay-buffer.js'
 import { CaptureManager } from './capture.js'
 import { GameDetector } from './game-detector.js'
 import { AudioDeviceChannels, AudioMix, invalidateDeviceCache } from './audio.js'
+import { LinuxEngine } from './linux/engine.js'
+import { LinuxReplayBuffer } from './linux/replay.js'
+import { LinuxCaptureManager } from './linux/capture.js'
+import { LinuxGameDetector } from './linux/game-detector.js'
+import { LinuxAudioDeviceChannels, LinuxAudioMix } from './linux/audio.js'
 import { notify, dismissPanel } from './notification.js'
 import { hotkeyTitle, installDefaultHotkeys, shutdown as shutdownHotkeys, startCapture, stopCapture } from './hotkey.js'
 import {
@@ -184,12 +189,12 @@ function toWebStream(stream: fs.ReadStream): ReadableStream {
 // Pipeline
 // ---------------------------------------------------------------------------
 
-let obsCore: ObsCore | null = null
-let replay: ReplayBuffer | null = null
-let capture: CaptureManager | null = null
-let detector: GameDetector | null = null
-let audioMix: AudioMix | null = null
-let audioDevices: AudioDeviceChannels | null = null
+let obsCore: ObsCore | LinuxEngine | null = null
+let replay: ReplayBuffer | LinuxReplayBuffer | null = null
+let capture: CaptureManager | LinuxCaptureManager | null = null
+let detector: GameDetector | LinuxGameDetector | null = null
+let audioMix: AudioMix | LinuxAudioMix | null = null
+let audioDevices: AudioDeviceChannels | LinuxAudioDeviceChannels | null = null
 
 let currentStatus: { status: ObsStatus; message?: string } = OBS_STATUS_MESSAGES.initializing
 let reinitMutex = new Mutex()
@@ -213,27 +218,62 @@ function buildPipeline(): void {
   const config = {
     bufferDuration: getSetting('bufferDuration'),
     fps: getSetting('fps'),
-    outputPath: getSetting('outputPath') || defaultOutputPath(),
+    // The engine and the library must agree on the directory. `outputRoot()` is
+    // `<chosen>/Rewind`, so a raw setting here put clips in `<chosen>/<source>`
+    // where nothing scanned for them.
+    outputPath: rewindRoot(getSetting('outputPath')),
     outputResolution: getSetting('outputResolution'),
   }
 
-  obsCore = new ObsCore(config)
-  replay = new ReplayBuffer(obsCore)
-  capture = new CaptureManager(obsCore)
-  detector = new GameDetector()
-  audioMix = new AudioMix({ obs: () => obsCore?.obs ?? null })
-  audioDevices = new AudioDeviceChannels({ obs: () => obsCore?.obs ?? null })
+  if (process.platform === 'linux') {
+    const engine = new LinuxEngine(config)
+    const buffer = new LinuxReplayBuffer(engine)
+    const manager = new LinuxCaptureManager(engine)
+    const watcher = new LinuxGameDetector()
+    const mix = new LinuxAudioMix()
+    const devices = new LinuxAudioDeviceChannels({ onChange: () => engine.audioChanged() })
 
-  capture.setReplayBuffer(replay)
-  capture.setGameDetector(detector)
+    manager.setReplayBuffer(buffer)
+    manager.setGameDetector(watcher)
+    manager.onRecordingFinished = registerFinishedFromBufferStop
+    engine.wire(manager, buffer, mix, devices)
+
+    watcher.setCapture(manager)
+    watcher.setGetMainWindow(getMainWindow)
+
+    obsCore = engine
+    replay = buffer
+    capture = manager
+    detector = watcher
+    audioMix = mix
+    audioDevices = devices
+    return
+  }
+
+  const core = new ObsCore(config)
+  const buffer = new ReplayBuffer(core)
+  const manager = new CaptureManager(core)
+  const watcher = new GameDetector()
+  const mix = new AudioMix({ obs: () => core.obs })
+  const devices = new AudioDeviceChannels({ obs: () => core.obs })
+
+  manager.setReplayBuffer(buffer)
+  manager.setGameDetector(watcher)
   // A display change stops and restarts the chain, so a recording still running is
   // finished by that teardown. Same registration the pause path uses.
-  capture.onRecordingFinished = registerFinishedFromBufferStop
+  manager.onRecordingFinished = registerFinishedFromBufferStop
 
-  obsCore.wire(capture, replay, audioMix, audioDevices)
+  core.wire(manager, buffer, mix, devices)
 
-  detector.setCapture(capture)
-  detector.setGetMainWindow(getMainWindow)
+  watcher.setCapture(manager)
+  watcher.setGetMainWindow(getMainWindow)
+
+  obsCore = core
+  replay = buffer
+  capture = manager
+  detector = watcher
+  audioMix = mix
+  audioDevices = devices
 }
 
 async function initPipeline(): Promise<void> {
@@ -255,7 +295,7 @@ async function initPipeline(): Promise<void> {
     require('./clip-manager.js').renameLegacySourceFolders(rewindRoot(getSetting('outputPath')))
     await startPipeline()
     setStatus(OBS_STATUS_MESSAGES.ready, getMainWindow())
-    log.info('OBS initialized and replay buffer started')
+    log.info(`${process.platform === 'linux' ? 'Linux capture' : 'OBS'} initialized and replay buffer started`)
   } catch (e) {
     log.error('Failed to initialize OBS:', e)
     setStatus({ status: 'error', message: errorMessage(e) }, getMainWindow())
@@ -1142,7 +1182,7 @@ async function runSettingsSelfTest(): Promise<void> {
 }
 
 /** Waits for the replay buffer to report active, or gives up. */
-async function waitForBuffer(buffer: ReplayBuffer, timeoutMs: number): Promise<void> {
+async function waitForBuffer(buffer: { isReplayBufferActive(): boolean }, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     if (buffer.isReplayBufferActive()) return
@@ -1599,6 +1639,12 @@ async function runRecordSelfTest(): Promise<void> {
 
   try {
     log.info(`RECORD TEST: redirecting output to ${outDir}`)
+    // The pipeline starts asynchronously from the same ready callback that kicks
+    // this test off, so the engine can still be booting here.
+    const readyBy = Date.now() + 60_000
+    while (!obsCore?.isInitialized() && Date.now() < readyBy) await sleep(250)
+    if (!obsCore?.isInitialized()) throw new Error('The capture engine did not initialize within 60s')
+
     setSetting('outputPath', outDir)
     detector?.stop()
     setSetting('captureMode', 'display')
@@ -1845,6 +1891,10 @@ async function runSelfTest(): Promise<void> {
     // fullscreen window for a game, and each switch rebuilds the replay chain — so
     // leaving it on would measure the detector, not the encoder.
     log.info(`SELFTEST: redirecting output to ${outDir}`)
+    const readyBy = Date.now() + 60_000
+    while (!obsCore?.isInitialized() && Date.now() < readyBy) await sleep(250)
+    if (!obsCore?.isInitialized()) throw new Error('The capture engine did not initialize within 60s')
+
     setSetting('outputPath', outDir)
     setSetting('screenshotPath', outDir)
     detector?.stop()
