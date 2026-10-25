@@ -151,12 +151,22 @@ npm run ffmpeg:linux   # ~170 MB: the Linux ffmpeg with PulseAudio and x11grab
 npm run dev
 ```
 
-Build the AppImage:
+Build the Linux packages:
 
 ```sh
 npm run package:linux
 # release/Rewind-<version>-x86_64.AppImage
+# release/Rewind-<version>-amd64.deb
 ```
+
+Install the Debian package on Debian, Ubuntu or Mint:
+
+```sh
+sudo apt install ./Rewind-<version>-amd64.deb
+```
+
+It installs to `/opt/Rewind`, adds `rewind-desktop` to your PATH and creates a
+desktop entry. The AppImage needs no install: make it executable and run it.
 
 `npm run ffmpeg:linux` is required once per checkout. Without it the app falls
 back to the `ffmpeg-static` binary, which cannot read Pulse sources, and clips

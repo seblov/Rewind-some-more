@@ -50,14 +50,27 @@ linux:
     - target: AppImage
       arch:
         - x64
+    - target: deb
+      arch:
+        - x64
   artifactName: ${productName}-${version}-${arch}.${ext}
   category: AudioVideo
   icon: assets/icon/icon-256.png
   synopsis: Save the last minute of your screen
   description: A local-first replay buffer, clip library and editor for Linux.
+  # These are the desktop entry's own keys. The `entry:` nesting this used to have
+  # rendered as a literal `entry=[object Object]` line in the .desktop file.
   desktop:
-    entry:
-      Name: Rewind
-      Comment: Save the last minute of your screen
-      Categories: AudioVideo;Recorder;
-      Keywords: capture;replay;clip;record;screen;
+    Name: Rewind
+    Comment: Save the last minute of your screen
+    Categories: AudioVideo;Recorder;
+    Keywords: capture;replay;clip;record;screen;
+
+deb:
+  # Debian's architecture name, not Electron's.
+  artifactName: ${productName}-${version}-amd64.${ext}
+  priority: optional
+  maintainer: Rewind <seblov@users.noreply.github.com>
+  # The maintained AppIndicator fork; libappindicator3-1 is not in Ubuntu 24.04.
+  recommends:
+    - libayatana-appindicator3-1

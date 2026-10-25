@@ -5,8 +5,8 @@
 
 ## Linux
 
-`Rewind-1.7.1-x86_64.AppImage` is the first Linux build. It uses ffmpeg and
-PulseAudio rather than the OBS engine the Windows app ships.
+The first Linux builds are here: an AppImage and a Debian package. They use
+ffmpeg and PulseAudio rather than the OBS engine the Windows app ships.
 
 - X11 desktops only. Wayland needs the PipeWire portal and is not supported yet.
 - Requires `pactl` (PulseAudio or PipeWire) and `wmctrl`.
@@ -18,7 +18,8 @@ continuous recording, screenshots, the clip library, the editor (trim, cut,
 reorder, waveforms, per-track volume), compression and sized exports, profiles,
 hotkeys, and per-app faders.
 
-Save the AppImage, make it executable with `chmod +x`, and run it. The first
+Install the Debian package with `sudo apt install ./Rewind-1.7.1-amd64.deb`, or
+save the AppImage, make it executable with `chmod +x`, and run it. The first
 launch creates the library in `~/Videos/Rewind`.
 
 ## What's new since 1.7.0
@@ -41,7 +42,9 @@ Also in this build:
 
 ## Assets
 
-- `Rewind-1.7.1-x86_64.AppImage`, the Linux build. X11, x86-64.
+- `Rewind-1.7.1-amd64.deb`, the Debian package for x86-64. Installs to
+  `/opt/Rewind` and adds a desktop entry.
+- `Rewind-1.7.1-x86_64.AppImage`, the portable Linux build. X11, x86-64.
 - `Rewind-1.7.1-setup.exe`, per-user Windows installer, no admin required.
 - `Rewind-1.7.1-setup.exe.blockmap`, required for in-app updates.
 - `latest.yml`, the Windows update feed. Required for in-app updates.
