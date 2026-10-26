@@ -556,7 +556,7 @@ export class AudioMix {
 }
 
 // ---------------------------------------------------------------------------
-// Extra device channels (up to 8 extra endpoints, optionally on their own tracks)
+// Extra device channels (up to 8 extra endpoints, each on its own track)
 // ---------------------------------------------------------------------------
 
 export class AudioDeviceChannels {
@@ -798,15 +798,15 @@ export class AudioDeviceChannels {
 }
 
 /**
- * Every extra device shares TRACK.DEVICE_BASE.
+ * Each extra device gets its own track, in the order the devices were added.
  *
- * This was conditional on `perDeviceAudioTracks`, which gave each device its own
- * track. That setting is gone; sharing one track is what it produced when off,
- * and it is the only layout with evidence behind it. Devices beyond
- * TRACK.MAX collapse onto the last track rather than being dropped.
+ * OBS records at most TRACK.MAX audio tracks and the mix, desktop and microphone
+ * tracks are always reserved, so devices past that ceiling share the last track
+ * rather than being dropped. `buildTrackLabels` joins the labels of channels that
+ * land on the same track.
  */
-export function deviceTrack(_index: number): number {
-  return TRACK.DEVICE_BASE
+export function deviceTrack(index: number): number {
+  return Math.min(TRACK.DEVICE_BASE + index, TRACK.MAX)
 }
 
 function findFreeSlot(used: number[], base: number, count: number): number | null {

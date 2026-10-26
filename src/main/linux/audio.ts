@@ -31,6 +31,8 @@ export interface LinuxMicStream extends LinuxAudioStream {
 
 export interface LinuxDeviceStream extends LinuxAudioStream {
   kind: 'device'
+  /** Pulse source name, used to line the channel's track up with the recorded stream. */
+  id: string
 }
 
 export function titleCase(s: string): string {
@@ -284,6 +286,7 @@ export class LinuxAudioDeviceChannels {
   getDevices(): AudioDevice[] {
     const available = cachedDeviceList()
     const stored = getSetting('deviceChannels')
+    const tracks = new Map(this.channelTracks().map((t) => [t.id, t.track]))
     const map = new Map<string, AudioDevice>()
 
     for (const d of available) {
@@ -294,7 +297,7 @@ export class LinuxAudioDeviceChannels {
         coveredBy: isCovered({ id: d.id, kind: d.kind, isSystemDefault: d.isSystemDefault }),
         volume: cfg?.volume ?? DEFAULT_SOUND.volume,
         muted: cfg?.muted ?? DEFAULT_SOUND.muted,
-        track: cfg ? TRACK.DEVICE_BASE : undefined,
+        track: tracks.get(d.id),
       })
     }
 
@@ -382,9 +385,13 @@ export class LinuxAudioDeviceChannels {
     this.deps.onChange?.()
   }
 
-  channelTracks(): { track: number; label: string }[] {
+  channelTracks(): { id: string; track: number; label: string }[] {
     const stored = getSetting('deviceChannels')
-    return Object.keys(stored).map((id) => ({ track: TRACK.DEVICE_BASE, label: stored[id].label }))
+    return this.streams().map((stream, i) => ({
+      id: stream.id,
+      track: TRACK.DEVICE_BASE + i,
+      label: stored[stream.id]?.label ?? stream.label,
+    }))
   }
 
   /** Resolved capture streams for the recorder, in settings order. */
@@ -397,6 +404,7 @@ export class LinuxAudioDeviceChannels {
       if (!source) continue
       out.push({
         kind: 'device',
+        id,
         source,
         label: cfg.label,
         volume: cfg.volume,

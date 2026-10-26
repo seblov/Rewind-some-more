@@ -206,8 +206,7 @@ export class LinuxEngine {
     if (!this.audioMixService?.desktopStream()) return []
     const labels = ['Mix', 'Desktop']
     if (this.hasMicrophone()) labels.push('Microphone')
-    const deviceLabels = (this.audioDeviceChannelService?.channelTracks() ?? []).map((t) => t.label)
-    if (deviceLabels.length) labels.push(deviceLabels.join(' + '))
+    for (const track of this.audioDeviceChannelService?.channelTracks() ?? []) labels.push(track.label)
     return labels
   }
 
@@ -215,7 +214,9 @@ export class LinuxEngine {
     if (!this.pulseSupported) return 0
     let mask = (1 << (TRACK.MIX - 1)) | (1 << (TRACK.DESKTOP - 1))
     if (this.hasMicrophone()) mask |= 1 << (TRACK.MIC - 1)
-    if ((this.audioDeviceChannelService?.channelTracks() ?? []).length) mask |= 1 << (TRACK.DEVICE_BASE - 1)
+    for (const track of this.audioDeviceChannelService?.channelTracks() ?? []) {
+      mask |= 1 << (track.track - 1)
+    }
     return mask
   }
 

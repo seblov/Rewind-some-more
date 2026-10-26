@@ -429,16 +429,16 @@ export class LinuxRecorder {
   }
 
   private buildAudio(options: RecorderOptions): { streams: RecorderStream[]; labels: string[] } {
-    // Desktop is track 2; mic is track 3 when present; every extra device shares
-    // track 4, matching the Windows layout (`deviceTrack` returns 4).
+    // Desktop is track 2; mic is track 3 when present; every extra device gets
+    // its own track after that, matching the Windows layout.
     const streams = [...options.streams]
     if (!streams.length) return { streams, labels: [] }
     const labels: string[] = ['Mix', 'Desktop']
     const mic = streams.find((s) => s.kind === 'microphone')
     if (mic) labels.push('Microphone')
-    const devices = streams.filter((s) => s.kind === 'device')
-    // The device labels are joined exactly as `buildTrackLabels` does.
-    if (devices.length) labels.push(devices.map((d) => d.label).join(' + '))
+    for (const s of streams) {
+      if (s.kind === 'device') labels.push(s.label)
+    }
     return { streams, labels }
   }
 
@@ -516,17 +516,6 @@ export class LinuxRecorder {
         `${mixLabels.join('')}amix=inputs=${audio.streams.length}:normalize=0:dropout_transition=0,` +
           `alimiter=limit=0.95[mix]`,
       )
-
-      // Every extra device shares one track, matching the Windows layout
-      // (`deviceTrack` returns TRACK.DEVICE_BASE for all of them). Without this
-      // they each became their own stream and the recorded labels no longer
-      // described the file.
-      if (deviceIndexes.length > 1) {
-        filters.push(
-          `${deviceIndexes.map((i) => `[t${i}]`).join('')}amix=inputs=${deviceIndexes.length}:normalize=0,` +
-            `alimiter=limit=0.95[devices]`,
-        )
-      }
     }
 
     if (filters.length) args.push('-filter_complex', filters.join(';'))
@@ -536,8 +525,7 @@ export class LinuxRecorder {
       args.push('-map', '[mix]')
       if (desktopIndex >= 0) args.push('-map', `[t${desktopIndex}]`)
       if (micIndex >= 0) args.push('-map', `[t${micIndex}]`)
-      if (deviceIndexes.length === 1) args.push('-map', `[t${deviceIndexes[0]}]`)
-      else if (deviceIndexes.length > 1) args.push('-map', '[devices]')
+      for (const i of deviceIndexes) args.push('-map', `[t${i}]`)
     }
 
     args.push(
@@ -555,7 +543,7 @@ export class LinuxRecorder {
       const titles = ['Mix']
       if (desktopIndex >= 0) titles.push('Desktop')
       if (micIndex >= 0) titles.push('Microphone')
-      if (deviceIndexes.length) titles.push(deviceIndexes.map((i) => audio.streams[i].label).join(' + '))
+      for (const i of deviceIndexes) titles.push(audio.streams[i].label)
       titles.forEach((title, i) => args.push(`-metadata:s:a:${i}`, `title=${title}`))
     }
 

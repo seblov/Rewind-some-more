@@ -406,20 +406,22 @@ broken.
 | Item | Where |
 |---|---|
 | Per-app audio mixing (`appAudioLevels`) | Settings → Audio |
-| Extra device channels (`deviceChannels`) | Settings → Audio |
+| Extra device channels on Windows (`deviceChannels`) | Settings → Audio |
 | 120 fps yields genuinely distinct frames | Settings → Quality |
 
-`perDeviceAudioTracks` is removed in 1.1.0 rather than verified: it was never
-exercised, and its off-state (extra devices sharing one track) is what ships.
+`perDeviceAudioTracks` was removed in 1.1.0 rather than verified. Each extra
+device now gets its own track, which is what that setting's on-state was meant to
+do.
 
 The three audio rows share a track-splitting foundation with
 `separateAudioTracks`, which is now verified — the mixer mask and multi-track muxing
 are known to work. That is not a pass for them: each needs its own recording, with
 per-app levels set or devices actually attached, and none has been run.
 
-Extra device channels now share a single track unconditionally, which is the
-behaviour `perDeviceAudioTracks: false` produced. No code path depends on it any
-more.
+Extra device channels are verified on Linux: two added devices produced five audio
+streams in a saved replay (Mix, Desktop, Microphone, and one per device). Windows
+is unverified. OBS there has three free tracks after Mix, Desktop and Microphone,
+so a fourth device shares track 6 rather than getting a track of its own.
 
 **AMD and Intel GPUs.** Only ever run on an NVIDIA RTX 5080. The encoder is
 detected at runtime and `codecsByVendor` covers NVENC, AMF and QSV with an x264

@@ -244,6 +244,7 @@ export const TRACK = {
   DESKTOP: 2,
   MIC: 3,
   DEVICE_BASE: 4,
+  /** OBS records at most six tracks; extra devices past this share the last one. */
   MAX: 6,
 } as const
 
