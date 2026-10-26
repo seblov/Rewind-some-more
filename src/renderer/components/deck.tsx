@@ -157,6 +157,7 @@ function ActionRow({
   onEditHotkey,
   busy,
   disabled = false,
+  disabledReason,
   tone = 'quiet',
 }: {
   testid: string
@@ -168,10 +169,13 @@ function ActionRow({
   busy?: boolean
   /** Fades the row and blocks the click, for an action the engine cannot run. */
   disabled?: boolean
+  /** Why the row cannot run, shown on hover. */
+  disabledReason?: string
   tone?: 'quiet' | 'primary' | 'danger'
 }) {
   return (
     <div
+      title={disabled ? disabledReason : undefined}
       className={cn(
         'group flex h-11 items-center gap-3 rounded-lg border px-3 transition-colors',
         tone === 'primary' && 'border-accent/30 bg-accent-soft hover:border-accent/60',
@@ -350,7 +354,7 @@ export function Deck({
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto scroll-clean p-6">
+    <div className="deck-scroll flex min-h-0 flex-1 flex-col overflow-y-auto p-6">
       <div className="flex items-center gap-8">
         <BufferDial
           active={bufferActive}
@@ -368,7 +372,7 @@ export function Deck({
           <p className="mt-1.5 text-[12px] text-ink-faint">
             {bufferActive
               ? `A clip keeps the last ${duration}s of it`
-              : 'Start the buffer and the last minute is always on disk'}
+              : `Start the buffer and it keeps the last ${duration}s on disk`}
           </p>
         </div>
 
@@ -377,7 +381,7 @@ export function Deck({
         <MicStrip />
       </div>
 
-      <div className="mt-8 flex flex-col gap-2">
+      <div className="deck-actions mt-8 flex flex-col gap-2">
         <ActionRow
           testid="save-clip"
           tone="primary"
@@ -387,6 +391,10 @@ export function Deck({
           onClick={onSaveClip}
           onEditHotkey={() => setEditAction('save-replay')}
           busy={saving}
+          // There is nothing to save while the buffer is off. The engine rejects
+          // the call, so leaving the primary action live only promises a failure.
+          disabled={!bufferActive}
+          disabledReason="Start the buffer to save a clip"
         />
         <ActionRow
           testid="record"
@@ -400,6 +408,7 @@ export function Deck({
           // Continuous recording rides on the buffer's replay chain: with the buffer
           // off there is nothing to record, and the engine rejects the start.
           disabled={!bufferActive && !recording}
+          disabledReason="Start the buffer to record"
         />
         <ActionRow
           testid="screenshot"
@@ -413,7 +422,7 @@ export function Deck({
       </div>
 
       {/* The controls anchor to the bottom of the pane so the dial keeps the top. */}
-      <div className="mt-auto flex flex-col gap-3 border-t border-line pt-4">
+      <div className="deck-foot mt-auto flex flex-col gap-3 border-t border-line pt-4">
         <div className="flex items-center gap-3">
           <span className="label shrink-0">Buffer limit</span>
           <div className="flex items-center gap-1" data-testid="buffer-limit">

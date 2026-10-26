@@ -18,8 +18,8 @@ const CONTENT: Record<BufferStatus, { title: string; subtitle: string; tone: 'ok
   screenshot: { title: 'Screenshot saved', subtitle: 'Saved to your screenshots folder', tone: 'ok' },
   error: { title: 'Something went wrong', subtitle: '', tone: 'error' },
   recorded: { title: 'Recording', subtitle: 'Saved to your replays folder', tone: 'ok' },
-  'buffer-on': { title: 'Recording started', subtitle: 'Buffer is rolling', tone: 'ok' },
-  'buffer-off': { title: 'Recording paused', subtitle: 'Buffer is not rolling', tone: 'ok' },
+  'buffer-on': { title: 'Buffer started', subtitle: 'The replay buffer is rolling', tone: 'ok' },
+  'buffer-off': { title: 'Buffer paused', subtitle: 'The replay buffer is not running', tone: 'ok' },
 }
 
 /**

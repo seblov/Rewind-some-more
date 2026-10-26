@@ -340,21 +340,21 @@ function AudioChannelEditor({ channel, label }: { channel: AudioChannel; label: 
   const selectable = ofKind.filter((d) => d.available && !d.added && !d.coveredBy)
   const added = ofKind.filter((d) => d.added)
   const boundMissing = bound !== 'default' && !ofKind.some((d) => d.id === bound && d.available)
-  // The endpoint Windows resolves "default" to, for this channel's kind.
+  // The endpoint the OS resolves "default" to, for this channel's kind.
   const systemDefault = ofKind.find((d) => d.isSystemDefault && d.available)
 
   // Every available endpoint is selectable by name — including the one the
   // default binding already covers, which previously vanished from the list and
   // read as "my microphone is not detected". Covered entries are marked instead.
   const deviceOptions: Option<string>[] = [
-    { value: 'default', label: systemDefault ? `Windows Default — ${systemDefault.label}` : 'Windows Default' },
+    { value: 'default', label: systemDefault ? `System Default — ${systemDefault.label}` : 'System Default' },
     ...ofKind
       .filter((d) => d.available && !d.added)
       .map((d) => ({
         value: d.id,
         // Only marked while the default binding covers it; an explicit bind of
         // the same device reports coveredBy too, but is not "the default".
-        label: bound === 'default' && d.coveredBy ? `${d.label} (Windows Default)` : d.label,
+        label: bound === 'default' && d.coveredBy ? `${d.label} (System Default)` : d.label,
       })),
   ]
 
@@ -454,7 +454,7 @@ function AudioChannelEditor({ channel, label }: { channel: AudioChannel; label: 
 
       {boundMissing ? (
         <p className="text-[11px] text-danger">
-          The selected device isn't connected, so nothing is being captured. Reconnect it, or switch back to Windows
+          The selected device isn't connected, so nothing is being captured. Reconnect it, or switch back to System
           Default.
         </p>
       ) : null}
@@ -595,7 +595,7 @@ function StartupSection() {
         <SettingSwitchRow
           binding={SETTINGS.launchOnStartup}
           label="Launch on startup"
-          description="Automatically start Rewind when you log in to Windows"
+          description="Automatically start Rewind when you log in"
         />
         <SettingSwitchRow
           binding={SETTINGS.startMinimized}

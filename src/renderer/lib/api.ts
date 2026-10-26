@@ -61,6 +61,14 @@ export interface UpdateState {
 }
 
 export interface RewindApi {
+  /** Host platform, exposed by the preload bridge. */
+  readonly platform: string
+  // Window chrome. Linux draws its own caption buttons; Windows keeps the overlay.
+  minimizeWindow(): Promise<IpcResult>
+  toggleMaximizeWindow(): Promise<IpcResult<{ maximized: boolean }>>
+  closeWindow(): Promise<IpcResult>
+  isWindowMaximized(): Promise<IpcResult<boolean>>
+
   // Replay
   saveReplay(): Promise<IpcResult<string>>
   takeScreenshot(): Promise<IpcResult<string>>
@@ -225,6 +233,7 @@ export interface RewindApi {
   on(event: 'export-progress', handler: (p: { percent: number }) => void): () => void
   on(event: 'play-notification-sound', handler: () => void): () => void
   on(event: 'profiles-changed', handler: (p: { activeProfile: number }) => void): () => void
+  on(event: 'window-state', handler: (s: { maximized: boolean }) => void): () => void
 }
 
 const bridge = (window as unknown as { electronAPI?: RewindApi }).electronAPI

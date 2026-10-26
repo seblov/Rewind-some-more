@@ -349,6 +349,7 @@ export function Rail({
   onOpenFolder,
   lastSavedAt,
   railWidth,
+  bufferActive,
 }: {
   view: View
   onViewChange: (view: View) => void
@@ -356,6 +357,8 @@ export function Rail({
   lastSavedAt: number | null
   /** The rail's current width: a change is the signal to re-lay the list. */
   railWidth: number
+  /** Save clip is disabled while the buffer is off, so the empty state must say so. */
+  bufferActive: boolean
 }) {
   const client = useQueryClient()
   const { runAction } = useBackgroundAction()
@@ -504,7 +507,9 @@ export function Rail({
           <p className="text-[13px] text-ink-muted">{view === 'clips' ? 'No clips yet' : 'No screenshots yet'}</p>
           <p className="text-[11px] text-ink-faint">
             {view === 'clips'
-              ? `Press Save clip${saveHotkey ? ` (${saveHotkey})` : ''} to keep the last moment.`
+              ? bufferActive
+                ? `Press Save clip${saveHotkey ? ` (${saveHotkey})` : ''} to keep the last moment.`
+                : 'Start the buffer to capture the last moment.'
               : 'Screenshots you take appear here.'}
           </p>
         </div>

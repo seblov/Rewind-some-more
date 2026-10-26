@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, clipUrl, formatBytes, formatDuration, messageOf } from '../lib/api'
 import { usePreviewAudio } from '../lib/editor-audio'
-import { Button, CenteredSpinner, cn } from './ui'
+import { Button, CenteredSpinner, Dialog, cn } from './ui'
 import {
   canSave,
   cutAt,
@@ -125,6 +125,8 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [saving, setSaving] = useState<{ mode: 'overwrite' | 'copy' } | null>(null)
+  /** Replacing the source is irreversible, so it asks before writing. */
+  const [confirmReplace, setConfirmReplace] = useState(false)
 
   const [duration, setDuration] = useState(0)
   /*
@@ -951,7 +953,7 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
           Close
         </Button>
         <Button
-          variant="secondary"
+          variant="primary"
           disabled={!!saving || !saveState.ok}
           onClick={() => void save('copy')}
           title="Writes the edit to a new file beside the clip; the original is kept"
@@ -959,14 +961,45 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
           {saving?.mode === 'copy' ? 'Saving…' : 'Save a copy'}
         </Button>
         <Button
-          variant="primary"
+          variant="danger"
           disabled={!!saving || !saveState.ok}
-          onClick={() => void save('overwrite')}
-          title="Writes the edit over the original clip"
+          onClick={() => setConfirmReplace(true)}
+          title="Writes the edit over the original clip. Asks before replacing it."
         >
           {saving?.mode === 'overwrite' ? 'Saving…' : 'Replace original'}
         </Button>
       </footer>
+
+      <Dialog
+        open={confirmReplace}
+        title="Replace the original clip?"
+        onClose={() => setConfirmReplace(false)}
+        dismissible={!saving}
+        footer={
+          <>
+            <Button variant="ghost" size="sm" className="flex-1" onClick={() => setConfirmReplace(false)} disabled={!!saving}>
+              Keep original
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
+              className="flex-1"
+              disabled={!!saving}
+              onClick={() => {
+                setConfirmReplace(false)
+                void save('overwrite')
+              }}
+            >
+              Replace original
+            </Button>
+          </>
+        }
+      >
+        <p className="text-[13px] text-ink-muted">
+          The edited clip will overwrite <span className="text-ink">{clipPath.split(/[\\/]/).pop()}</span>. The original
+          cannot be recovered.
+        </p>
+      </Dialog>
     </div>
   )
 }

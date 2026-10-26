@@ -17,6 +17,15 @@ const invoke = (channel: string) => (...args: unknown[]): Promise<IpcResult<any>
 
 const api: Record<string, unknown> = {}
 
+// Window chrome. The renderer owns the caption buttons on Linux; Windows keeps
+// the native titleBarOverlay.
+api.minimizeWindow = invoke(IPC.minimizeWindow)
+api.toggleMaximizeWindow = invoke(IPC.toggleMaximizeWindow)
+api.closeWindow = invoke(IPC.closeWindow)
+api.isWindowMaximized = invoke(IPC.isWindowMaximized)
+/** The renderer matches the native chrome to the host, not to a user agent. */
+api.platform = process.platform
+
 // Replay / buffer
 api.saveReplay = invoke(IPC.saveReplay)
 api.takeScreenshot = invoke(IPC.takeScreenshot)

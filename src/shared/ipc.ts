@@ -1,6 +1,13 @@
 /** IPC channel names. Kept as a single source of truth for preload + main registration. */
 
 export const IPC = {
+  // Window chrome. Frameless Linux windows draw their own caption buttons;
+  // Windows keeps the native titleBarOverlay and never calls these.
+  minimizeWindow: 'minimize-window',
+  toggleMaximizeWindow: 'toggle-maximize-window',
+  closeWindow: 'close-window',
+  isWindowMaximized: 'is-window-maximized',
+
   // replay / buffer
   saveReplay: 'save-replay',
   takeScreenshot: 'take-screenshot',
@@ -167,4 +174,5 @@ export const EVENT_CHANNELS = [
   'play-notification-sound',
   'update-state',
   'profiles-changed',
+  'window-state',
 ] as const

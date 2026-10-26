@@ -35,7 +35,10 @@
 
   --color-ink: oklch(96% 0.002 285);
   --color-ink-muted: oklch(72% 0.008 285);
-  --color-ink-faint: oklch(58% 0.010 285);
+  /* Faint is helper text, not decoration. Each theme keeps it above 4.5:1 on
+     `raised`, the lightest surface it sits on: graphite 4.75, terminal 4.67,
+     grotesk 4.64. */
+  --color-ink-faint: oklch(64% 0.010 285);
 
   /* Accent is a deep indigo, taken from the cool end of the logo's dial.
      At hue 285 it sits 263 degrees from danger red and 190 from warn yellow, so
@@ -45,10 +48,12 @@
   --color-accent-dim: oklch(60% 0.14 285);
   --color-accent-soft: oklch(72% 0.16 285 / 0.14);
 
-  /* Danger is red, and it has to stay legible as "recording" with an orange
-     accent 33 degrees away. Deepened in lightness and chroma so the pair reads
-     apart rather than as two shades of the same fire. */
-  --color-danger: oklch(62% 0.2 22);
+  /* Danger has two jobs, and one value cannot clear 4.5:1 for both. As text on
+     the dark surfaces it is the lighter token: 5.18:1 on surface, 4.68:1 on
+     raised. As a filled button it sits under white, so the fill is darker:
+     5.16:1. `ink` is not used there because it drops to 90% in the Terminal theme. */
+  --color-danger: oklch(66% 0.2 22);
+  --color-danger-fill: oklch(56% 0.2 22);
   /* Warn moved amber (80) to yellow (95). Amber was too close to the new accent. */
   --color-warn: oklch(84% 0.15 95);
 
@@ -85,7 +90,7 @@
 
   --color-ink: oklch(90% 0.02 150);
   --color-ink-muted: oklch(66% 0.03 150);
-  --color-ink-faint: oklch(52% 0.03 150);
+  --color-ink-faint: oklch(60% 0.03 150);
 
   --color-accent: oklch(76% 0.17 150);
   --color-accent-dim: oklch(62% 0.15 150);
@@ -103,7 +108,7 @@
 
   --color-ink: oklch(95% 0.004 250);
   --color-ink-muted: oklch(72% 0.012 250);
-  --color-ink-faint: oklch(58% 0.014 250);
+  --color-ink-faint: oklch(62% 0.014 250);
 
   --color-accent: oklch(74% 0.14 235);
   --color-accent-dim: oklch(60% 0.12 235);
@@ -267,26 +272,37 @@
 /*
  * Scrollbars.
  *
- * Suppressing them was a mistake on the panel, where overlay scrollbars cover a
- * 400px surface — but Settings is a long page, and removing its scrollbar removed
- * the only signal that Hotkeys and the encoder settings existed at all. The rule
- * is now scoped: lists inside the panel stay clean, and anything that actually
- * scrolls gets a thin bar drawn from the palette rather than the OS default.
+ * Anything that actually scrolls gets a thin bar drawn from the palette rather
+ * than the OS default. The deck previously hid its bar, which left a clipped
+ * bottom row with no signal that more content existed.
  */
-.scroll-clean {
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-}
-
-.scroll-clean::-webkit-scrollbar {
-  width: 0;
-  height: 0;
-  display: none;
-}
-
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--color-line-strong) transparent;
+}
+
+/*
+ * Compact deck for short windows.
+ *
+ * The panel's minimum height leaves 464px for the deck. At the default 24px
+ * padding and 32px action gap the Quick clip row sat behind the status strip.
+ * Tighten the rhythm only, never the controls. If a larger text size still
+ * overflows, the deck's thin scrollbar is now visible.
+ */
+@media (max-height: 600px) {
+  .deck-scroll {
+    padding: 16px;
+  }
+
+  .deck-actions {
+    margin-top: 20px;
+    gap: 6px;
+  }
+
+  .deck-foot {
+    padding-top: 12px;
+    gap: 8px;
+  }
 }
 
 ::-webkit-scrollbar {

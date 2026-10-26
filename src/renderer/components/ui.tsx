@@ -32,7 +32,10 @@ const VARIANTS = {
   secondary: 'bg-raised text-ink hover:bg-line border border-line',
   ghost: 'text-ink-muted hover:text-ink hover:bg-raised',
   outline: 'border border-line text-ink-muted hover:text-ink hover:border-line-strong',
-  danger: 'bg-danger text-ink hover:bg-danger/90',
+  // Filled danger uses its own darker token and white: `danger` is tuned for text
+  // on the dark surfaces, and `ink` is 90 to 96% depending on the theme, so it
+  // does not clear 4.5:1 on the fill everywhere. White does, at 5.16:1.
+  danger: 'bg-danger-fill text-white hover:bg-danger-fill/90',
 } as const
 
 const SIZES = {
@@ -320,6 +323,7 @@ export function Menu({
   align = 'end',
   label,
   initialFocusIndex,
+  anchorClassName,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -330,6 +334,8 @@ export function Menu({
   label?: string
   /** Which item takes focus on open. Defaults to the first enabled one. */
   initialFocusIndex?: number
+  /** Layout for the wrapper that owns the trigger. `Select` uses it to shrink. */
+  anchorClassName?: string
 }) {
   const anchorRef = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState({ top: 0, left: 0 })
@@ -379,7 +385,11 @@ export function Menu({
     const el = anchorRef.current
     if (!el) return
 
-    const anchor = el.getBoundingClientRect()
+    // Align to the visible trigger, not to the wrapper. A `Select` can make its
+    // wrapper fill the row while the button itself stays content-sized; anchoring
+    // the menu to the wrapper would leave it floating far from the control.
+    const target = el.querySelector<HTMLElement>('button, [href], input, select, textarea') ?? el
+    const anchor = target.getBoundingClientRect()
     const width = menuRef.current?.offsetWidth || 176
     const height = menuRef.current?.offsetHeight || 4 * 30 + 12
     const gap = 4
@@ -496,6 +506,7 @@ export function Menu({
     <>
       <div
         ref={anchorRef}
+        className={cn('min-w-0', anchorClassName)}
         onClick={(e) => {
           // The trigger usually sits inside a clickable row; without this, opening
           // the menu also triggers the row action.

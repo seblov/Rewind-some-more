@@ -200,6 +200,8 @@ function createMainWindow(showOnStart: boolean, onCreated?: (win: BrowserWindow)
     // requested size holds.
     frame: false,
     titleBarStyle: 'hidden',
+    // Windows draws the caption buttons over the renderer. Linux has no overlay,
+    // so Titlebar renders the controls itself and does not reserve this strip.
     titleBarOverlay: { color: '#131316', symbolColor: '#a7a7ad', height: 40 },
     transparent: false,
     alwaysOnTop: false,
@@ -217,6 +219,16 @@ function createMainWindow(showOnStart: boolean, onCreated?: (win: BrowserWindow)
   })
 
   win.setMenuBarVisibility(false)
+
+  // The renderer draws the maximize/restore glyph from this event. A window
+  // manager can maximize on its own (a double-click on the drag region, a tiling
+  // shortcut), so the titlebar cannot infer the state from its own button alone.
+  const sendWindowState = () => {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) return
+    win.webContents.send('window-state', { maximized: win.isMaximized() })
+  }
+  win.on('maximize', sendWindowState)
+  win.on('unmaximize', sendWindowState)
   // Starting minimized is the tray behaviour: the window is built and ready to be
   // shown, it just stays off screen until the tray icon, a hotkey or a second
   // launch asks for it. Read here rather than at quit time so the choice applies to

@@ -329,6 +329,7 @@ export function MainView() {
             onOpenFolder={openFolder}
             lastSavedAt={lastSaved}
             railWidth={railWidth}
+            bufferActive={bufferActive}
           />
         </aside>
       </div>
@@ -386,7 +387,7 @@ function StatusStrip({
             className="flex items-center gap-1.5"
             title={`${held} of ${bufferSeconds} seconds of footage recoverable`}
           >
-            <span className={cn('h-2 w-2 rounded-full', full ? 'bg-danger' : 'bg-ink-muted')} />
+            <span className={cn('h-2 w-2 rounded-full', full ? 'bg-accent' : 'bg-ink-muted')} />
             <span className="tabular font-medium text-ink">
               {held}s of {bufferSeconds}s buffered
             </span>

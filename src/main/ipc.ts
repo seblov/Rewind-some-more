@@ -198,6 +198,39 @@ export function registerIpc(s: Services): void {
     obsCore().isInitialized() ? null : fail('OBS not initialized', 'obs-not-initialized')
 
   // -------------------------------------------------------------------------
+  // Window chrome
+  // -------------------------------------------------------------------------
+
+  handle(IPC.minimizeWindow, () => {
+    const win = s.getMainWindow()
+    if (!win) return fail('No window to minimize')
+    win.minimize()
+    return ok()
+  })
+
+  handle(IPC.toggleMaximizeWindow, () => {
+    const win = s.getMainWindow()
+    if (!win) return fail('No window to maximize')
+    const maximized = !win.isMaximized()
+    if (maximized) win.maximize()
+    else win.unmaximize()
+    // Report the intent. The window-state event corrects the icon if the window
+    // manager refuses, without waiting for a round trip here.
+    return ok({ maximized })
+  })
+
+  handle(IPC.closeWindow, () => {
+    const win = s.getMainWindow()
+    if (!win) return fail('No window to close')
+    // The close handler in window.ts hides the panel to the tray; it does not
+    // quit the app.
+    win.close()
+    return ok()
+  })
+
+  handle(IPC.isWindowMaximized, () => ok(s.getMainWindow()?.isMaximized() ?? false))
+
+  // -------------------------------------------------------------------------
   // Replay / buffer
   // -------------------------------------------------------------------------
 

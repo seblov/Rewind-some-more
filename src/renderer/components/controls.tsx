@@ -57,6 +57,10 @@ export function Select<T extends string | number>({
       align={align}
       label={label ?? display}
       initialFocusIndex={Math.max(0, options.findIndex((o) => o.value === value))}
+      // The trigger is a flex item inside this wrapper. Without a shrinkable
+      // anchor a long device name sizes the whole control to its text and the
+      // settings page grows a horizontal scrollbar.
+      anchorClassName="flex min-w-0 flex-1"
       trigger={
         <button
           type="button"
