@@ -1009,8 +1009,10 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
  *
  * Each Quality chip is a fraction of the original clip's own bitrate — the point
  * of compressing is to reduce, so the ask is always below what the source spent
- * and the file can never come out larger. The readout shows the size that
- * bitrate produces and the exact reduction against the original clip.
+ * and the file can never come out larger. Discord instead names a size: the
+ * free upload limit, which the encode is held under rather than aimed at. The
+ * readout shows the size that bitrate produces and the exact reduction against
+ * the original clip.
  */
 function ExportSection({
   clipPath,
@@ -1030,10 +1032,17 @@ function ExportSection({
   /** Which piece the section will act on, in words, for the header line. */
   scope: string
 }) {
-  /** Fraction of the source's own bitrate each chip encodes at. */
+  /** Fraction of the source's own bitrate each quality chip encodes at. */
   const QUALITY_FRACTIONS = { low: 0.4, medium: 0.65, high: 0.9 } as const
   type Quality = keyof typeof QUALITY_FRACTIONS
-  const [quality, setQuality] = useState<Quality>('medium')
+  /**
+   * Discord's free upload limit is 50 MB, in the same MB this app counts in, and
+   * the goal keeps a hair under it rather than landing on the line.
+   */
+  const DISCORD_MAX_MB = 49.9
+  /** A goal is a quality fraction, or an absolute size a share needs to fit. */
+  type Goal = Quality | 'discord'
+  const [goal, setGoal] = useState<Goal>('medium')
   const [running, setRunning] = useState(false)
   const [percent, setPercent] = useState(0)
   const [error, setError] = useState<string | null>(null)
@@ -1049,17 +1058,33 @@ function ExportSection({
   const exportLength = Math.max(0, endSec - startSec)
 
   /*
-   * The size model: each chip encodes at a fraction of the source's own bitrate
-   * (video = fraction − 128 kbps of audio, floored at 200). The readout and the
-   * target the encoder receives are the same arithmetic, so the file lands on the
-   * number shown. On very low-bitrate sources the 200 kbps floor can exceed the
-   * fraction — the percent readout says so honestly.
+   * The size model: each quality chip encodes at a fraction of the source's own
+   * bitrate (video = fraction − 128 kbps of audio, floored at 200). The Discord
+   * goal instead spends whatever bitrate lands the file on DISCORD_MAX_MB, but
+   * never more than High: a share goal exists to reduce, not to inflate a clip
+   * that already fits. The readout and the target the encoder receives are the
+   * same arithmetic, so the file lands on the number shown. On very low-bitrate
+   * sources the 200 kbps floor can exceed the fraction — the percent readout
+   * says so honestly.
    */
   const srcKbps = fileSize > 0 && duration > 0 ? (fileSize * 8) / duration / 1000 : 0
+  /** The bitrate below which an export cannot express anything watchable. Mirrors main/export.ts. */
+  const FLOOR_KBPS = 200
   // The validator caps an export at 500 MB; keep the ask inside it instead of
   // letting a long range produce a number the button then refuses.
   const cap500Kbps = exportLength > 0 ? Math.max(200, (500 * 8 * 1024) / exportLength - 129) : Infinity
-  const videoKbps = Math.min(Math.max(200, Math.floor(srcKbps * QUALITY_FRACTIONS[quality]) - 128), cap500Kbps)
+  /** Video bitrate for a fraction of the source's own, above the watchable floor. */
+  const kbpsFor = (fraction: number) => Math.max(FLOOR_KBPS, Math.floor(srcKbps * fraction) - 128)
+  /** What the Discord ceiling can spend on this range's video, before the floor. */
+  const discordFit = Math.floor((DISCORD_MAX_MB * 8 * 1024) / Math.max(exportLength, 1)) - 128
+  const discordKbps = Math.max(FLOOR_KBPS, discordFit)
+  /** A range too long for 49.9 MB at a watchable bitrate: the goal is not reachable. */
+  const discordFits = discordFit >= FLOOR_KBPS
+  const goalKbps =
+    goal === 'discord'
+      ? Math.min(discordKbps, kbpsFor(QUALITY_FRACTIONS.high))
+      : kbpsFor(QUALITY_FRACTIONS[goal])
+  const videoKbps = Math.min(goalKbps, cap500Kbps)
   // +129, not +128: main recomputes the video bitrate from this target with a
   // floor at 200, and one kbps of headroom keeps the roundtrip above the floor.
   const estMb = Math.max(0.1, ((videoKbps + 129) * exportLength) / 8 / 1024)
@@ -1088,6 +1113,9 @@ function ExportSection({
         startSec,
         endSec,
         targetMb: Math.max(0.1, ((videoKbps + 129) * exportLength) / 8 / 1024),
+        // A share limit is a ceiling, not an average: main measures the encode
+        // and tries lower when a single-pass GPU run overshoots it.
+        ...(goal === 'discord' ? { maxMb: DISCORD_MAX_MB } : {}),
       }
       const res = await api.editorExport(req)
       if (!res.success || !res.data) {
@@ -1105,15 +1133,18 @@ function ExportSection({
   const exportDisabledReason =
     exportLength < 1
       ? 'Nothing to compress here — put the playhead on a piece, or select one'
-      : running
-        ? 'An export is already running'
-        : null
+      : goal === 'discord' && !discordFits
+        ? `This range cannot fit ${DISCORD_MAX_MB} MB at a watchable bitrate — trim it or pick a quality`
+        : running
+          ? 'An export is already running'
+          : null
+  const discordBlocked = goal === 'discord' && !discordFits
 
   return (
     <div className="overflow-hidden rounded-lg border border-line bg-surface px-3 py-2" data-testid="export-section">
-      {/* Both rows are nowrap on purpose: at the window's minimum width they fit,
-          and a resize reflows nothing — the flexible text shrinks instead. */}
-      <div className="flex flex-nowrap items-center gap-x-3">
+      {/* The settings line fills the width and drops its action to a second,
+          right-aligned line when the two no longer fit beside each other. */}
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <span className="text-[12px] font-medium">Compress</span>
         <span className="truncate text-[11px] text-ink-faint" data-testid="export-scope">
           on {scope}
@@ -1141,11 +1172,12 @@ function ExportSection({
                 key={label}
                 type="button"
                 disabled={running}
-                data-testid={`quality-${label}`}
-                onClick={() => setQuality(label)}
+                data-testid={`goal-${label}`}
+                title={`${Math.round(QUALITY_FRACTIONS[label] * 100)}% of the clip's bitrate`}
+                onClick={() => setGoal(label)}
                 className={cn(
                   'rounded border px-2 py-0.5 text-[11px] capitalize transition-colors',
-                  quality === label
+                  goal === label
                     ? 'border-accent/60 bg-accent/10 text-ink'
                     : 'border-line text-ink-muted hover:text-ink',
                 )}
@@ -1153,19 +1185,40 @@ function ExportSection({
                 {label}
               </button>
             ))}
+            <span className="h-4 w-px shrink-0 bg-line" aria-hidden />
+            <button
+              type="button"
+              disabled={running}
+              aria-pressed={goal === 'discord'}
+              data-testid="goal-discord"
+              title={`Compress to fit Discord's 50 MB free upload limit (${DISCORD_MAX_MB} MB target)`}
+              onClick={() => setGoal('discord')}
+              className={cn(
+                'rounded border px-2 py-0.5 text-[11px] transition-colors',
+                goal === 'discord'
+                  ? 'border-accent/60 bg-accent/10 text-ink'
+                  : 'border-line text-ink-muted hover:text-ink',
+              )}
+            >
+              Discord
+            </button>
             <span className="tabular text-[11px] text-ink-muted" data-testid="size-readout">
-              ≈ {estMb < 10 ? estMb.toFixed(1) : Math.round(estMb)} MB
+              {discordBlocked
+                ? `won't fit ${DISCORD_MAX_MB} MB`
+                : `≈ ${estMb < 10 || goal === 'discord' ? estMb.toFixed(1) : Math.round(estMb)} MB`}
             </span>
-            {savingsLine ? <span className="tabular text-[11px] text-accent">{savingsLine}</span> : null}
+            {savingsLine && !discordBlocked ? (
+              <span className="tabular text-[11px] text-accent">{savingsLine}</span>
+            ) : null}
 
-            {/* The action rides the same line as the settings it uses, so the panel fills
-                its width instead of stacking half-empty rows. */}
+            {/* The action takes the end of the settings line, or a line of its
+                own when there is no room beside them. */}
             <span className="ml-auto" title={exportDisabledReason ?? undefined}>
               <Button
                 variant="primary"
                 size="sm"
                 data-testid="export-button"
-                disabled={busy || running || exportLength < 1}
+                disabled={busy || running || exportLength < 1 || discordBlocked}
                 onClick={() => void run()}
               >
                 Compress to new file

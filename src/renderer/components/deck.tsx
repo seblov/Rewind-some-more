@@ -23,10 +23,16 @@ const LIMIT_OPTIONS = [
   { seconds: 60, label: '1m' },
   { seconds: 120, label: '2m' },
   { seconds: 300, label: '5m' },
+  { seconds: 600, label: '10m' },
+  { seconds: 1800, label: '30m' },
 ]
 
 /** One press of the custom limit's stepper, in seconds. */
 const LIMIT_STEP = 5
+
+/** `30s` / `5m` for a length that is not one of the presets. */
+const formatLimit = (seconds: number) =>
+  seconds >= 60 && seconds % 60 === 0 ? `${seconds / 60}m` : `${seconds}s`
 
 /**
  * The buffer dial.
@@ -322,11 +328,11 @@ export function Deck({
   // A duration the user set elsewhere (or an older value) still shows, so the
   // strip never claims a limit that is not in force.
   const known = LIMIT_OPTIONS.some((o) => o.seconds === duration)
-  const options = known ? LIMIT_OPTIONS : [...LIMIT_OPTIONS, { seconds: duration, label: `${duration}s` }]
+  const options = known ? LIMIT_OPTIONS : [...LIMIT_OPTIONS, { seconds: duration, label: formatLimit(duration) }]
 
   // Custom limit: the presets cover the common windows, this covers the rest of
-  // the 5-600s range the engine accepts. It applies on Enter or blur, so typing
-  // "120" does not restart the buffer three times on the way there.
+  // the range the engine accepts. It applies on Enter or blur, so typing
+  // "1800" does not restart the buffer four times on the way there.
   const [customLimit, setCustomLimit] = useState(() => String(duration))
   useEffect(() => {
     setCustomLimit(String(duration))
@@ -371,8 +377,8 @@ export function Deck({
           </p>
           <p className="mt-1.5 text-[12px] text-ink-faint">
             {bufferActive
-              ? `A clip keeps the last ${duration}s of it`
-              : `Start the buffer and it keeps the last ${duration}s on disk`}
+              ? `A clip keeps the last ${formatLimit(duration)} of it`
+              : `Start the buffer and it keeps the last ${formatLimit(duration)} on disk`}
           </p>
         </div>
 
@@ -423,7 +429,7 @@ export function Deck({
 
       {/* The controls anchor to the bottom of the pane so the dial keeps the top. */}
       <div className="deck-foot mt-auto flex flex-col gap-3 border-t border-line pt-4">
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <span className="label shrink-0">Buffer limit</span>
           <div className="flex items-center gap-1" data-testid="buffer-limit">
           {options.map((option) => {
@@ -448,8 +454,8 @@ export function Deck({
           })}
           </div>
 
-          {/* Any window the presets do not cover, inside the engine's 5-600s range.
-              The spinner is the deck's own: the native one is a light grey box that
+          {/* Any window the presets do not cover, inside the engine's range. The
+              spinner is the deck's own: the native one is a light grey box that
               belongs to no other control here. */}
           <div className="ml-auto flex h-7 items-center rounded-md border border-line bg-raised/50 focus-within:border-accent">
             <input
@@ -472,7 +478,7 @@ export function Deck({
                 }
               }}
               aria-label="Custom buffer limit in seconds"
-              title={`Custom limit, ${BUFFER_DURATION_MIN}-${BUFFER_DURATION_MAX} seconds`}
+              title={`Custom limit in seconds, up to ${BUFFER_DURATION_MAX / 60} minutes`}
               data-testid="buffer-limit-custom"
               className="tabular h-full w-[46px] bg-transparent px-2 text-right text-[12px] outline-none"
             />

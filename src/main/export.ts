@@ -100,6 +100,8 @@ export function videoArgs(encoder: string | null, kbps: number): string[] {
  * the keyframe and discards the excess, so the cut is frame-accurate and still fast.
  * The target bitrate is what the readout promised; the GPU encoders land within
  * about ten percent of it in a single pass, the CPU fallback two-passes to it.
+ * `maxMb` turns that "about" into a ceiling by measuring the result and trying
+ * again at a lower bitrate when it overspends.
  * The output keeps the source's resolution: a share clip is encoded at the pixels
  * it was recorded with, never downscaled.
  */
@@ -156,12 +158,12 @@ async function runExport(
   }
 
   const encoder = await detectGpuEncoder()
-  const vArgs = videoArgs(encoder, videoKbps)
   // The CPU fallback's thread budget limits the decoder too: input-side threads.
   const cpuThreads = getSetting('exportThreads') || 0
   const inputThreads = !encoder && cpuThreads > 0 ? ['-threads', String(cpuThreads)] : []
 
-  try {
+  const encode = async (kbps: number): Promise<void> => {
+    const vArgs = videoArgs(encoder, kbps)
     if (encoder) {
       // GPU: one pass. VBR at the promised bitrate lands within ~10% of it.
       await runFfmpeg(
@@ -173,32 +175,60 @@ async function runExport(
         signal,
         report((p) => p),
       ).promise
-    } else {
-      // CPU: two passes at the promised bitrate, so the file lands on the number.
-      const passDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rewind-export-'))
-      const passlog = path.join(passDir, 'pass')
+      return
+    }
+    // CPU: two passes at the promised bitrate, so the file lands on the number.
+    const passDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rewind-export-'))
+    const passlog = path.join(passDir, 'pass')
+    try {
+      await runFfmpeg(
+        [...inputThreads, ...seek, ...vArgs, ...progress, '-an', '-pass', '1', '-passlogfile', passlog, '-f', 'null', '-'],
+        signal,
+        report((p) => p * 0.4),
+      ).promise
+      await runFfmpeg(
+        [
+          ...inputThreads, ...seek, ...vArgs,
+          '-map', '0:v:0', '-map', '0:a:0?', '-c:a', 'aac', '-b:a', `${AUDIO_KBPS}k`,
+          ...progress, '-pass', '2', '-passlogfile', passlog, '-movflags', '+faststart', '-y', out,
+        ],
+        signal,
+        report((p) => 40 + p * 0.6),
+      ).promise
+    } finally {
       try {
-        await runFfmpeg(
-          [...inputThreads, ...seek, ...vArgs, ...progress, '-an', '-pass', '1', '-passlogfile', passlog, '-f', 'null', '-'],
-          signal,
-          report((p) => p * 0.4),
-        ).promise
-        await runFfmpeg(
-          [
-            ...inputThreads, ...seek, ...vArgs,
-            '-map', '0:v:0', '-map', '0:a:0?', '-c:a', 'aac', '-b:a', `${AUDIO_KBPS}k`,
-            ...progress, '-pass', '2', '-passlogfile', passlog, '-movflags', '+faststart', '-y', out,
-          ],
-          signal,
-          report((p) => 40 + p * 0.6),
-        ).promise
-      } finally {
-        try {
-          fs.rmSync(passDir, { recursive: true, force: true })
-        } catch {
-          /* best effort */
-        }
+        fs.rmSync(passDir, { recursive: true, force: true })
+      } catch {
+        /* best effort */
       }
+    }
+  }
+
+  try {
+    /*
+     * A ceiling is not an average: a GPU VBR pass can spend a quarter more than
+     * it was asked for, which is fine for "about 40 MB" and fatal for a 50 MB
+     * upload limit. So with `maxMb` set the result is measured, and a lower
+     * bitrate is tried when it overspends. The retry is scaled by how far over
+     * the file landed, with a margin for the rate control drifting between
+     * passes on short clips -- measured at up to ~14% on a noise source. Two
+     * retries are allowed before the ceiling is declared unreachable.
+     */
+    const capBytes = req.maxMb ? Math.ceil(req.maxMb * 1024 * 1024) : 0
+    let askedKbps = videoKbps
+    for (let attempt = 0; ; attempt++) {
+      await encode(askedKbps)
+      const landed = fs.statSync(out).size
+      if (!capBytes || landed <= capBytes) break
+      if (attempt >= 2) {
+        throw new Error(`Could not fit the export in ${req.maxMb} MB — it landed at ${(landed / 1024 / 1024).toFixed(1)} MB`)
+      }
+      const next = Math.floor((askedKbps * capBytes * 0.85) / landed)
+      if (next < MIN_VIDEO_KBPS) {
+        throw new Error(`Could not fit the export in ${req.maxMb} MB — the range is too long for that size`)
+      }
+      log.info(`Export overshot ${req.maxMb} MB (${(landed / 1024 / 1024).toFixed(2)} MB), retrying at ${next} kbps`)
+      askedKbps = next
     }
 
     const bytes = fs.statSync(out).size

@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { scope } from '../logger.js'
 import { ffmpegTo, resolveFfmpeg } from '../ffmpeg.js'
-import { RECORDINGS_SUBDIR, type VisualQuality } from '@shared/constants.js'
+import { BUFFER_DURATION_MAX, RECORDINGS_SUBDIR, type VisualQuality } from '@shared/constants.js'
 
 const log = scope('Recorder')
 
@@ -95,9 +95,6 @@ export function qualityTarget(quality: VisualQuality): string {
   return `CRF ${QUALITY[quality].crf}`
 }
 
-/** Must match BUFFER_DURATION_MAX; duplicated here to keep the module free of the renderer's consts. */
-const BUFFER_MAX_SEC = 300
-
 let cachedRing: string | null = null
 
 /**
@@ -115,7 +112,7 @@ function ringRoot(): string {
     const free = st.bavail * st.bsize
     // Worst case: the longest window the engine accepts, at 20 Mbps video plus
     // six 160 kbps audio tracks.
-    const worstBytes = (BUFFER_MAX_SEC * (20_000 + 960) * 1000) / 8
+    const worstBytes = (BUFFER_DURATION_MAX * (20_000 + 960) * 1000) / 8
     if (free > worstBytes * 1.25) {
       cachedRing = path.join(shm, `rewind-replay-${process.getuid?.() ?? 0}`)
       return cachedRing

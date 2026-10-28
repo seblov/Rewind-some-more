@@ -269,6 +269,12 @@ export interface ExportRequest {
   endSec: number
   /** Two-pass target in MB (audio always kept at 128 kbps inside it). */
   targetMb: number
+  /**
+   * Hard ceiling in MB. The single-pass GPU encode can land above its asked
+   * bitrate, so when this is set the export measures the file and re-encodes at
+   * a lower bitrate rather than handing back one over the line.
+   */
+  maxMb?: number
 }
 
 export interface ExportResult {

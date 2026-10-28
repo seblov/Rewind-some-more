@@ -1915,7 +1915,7 @@ const isDeleteScope = (v: unknown): v is DeleteScope => v === 'both' || v === 'l
 /**
  * Buffer length bounds, in seconds.
  *
- * The ceiling is 10 minutes because that is what the homepage slider offers.
+ * The ceiling is 30 minutes, the longest window the deck offers.
  * OBS has no byte ceiling on this output (see replay-buffer.ts), so the upper
  * bound is the only thing standing between a user and an unbounded RAM
  * allocation -- it is a deliberate limit, not an arbitrary one.
@@ -1957,6 +1957,7 @@ function isExportRequest(v: unknown): v is {
   startSec: number
   endSec: number
   targetMb: number
+  maxMb?: number
 } {
   if (!v || typeof v !== 'object') return false
   const a = v as any
@@ -1964,6 +1965,12 @@ function isExportRequest(v: unknown): v is {
   if (typeof a.startSec !== 'number' || !Number.isFinite(a.startSec) || a.startSec < 0) return false
   if (typeof a.endSec !== 'number' || !Number.isFinite(a.endSec) || a.endSec <= a.startSec) return false
   if (typeof a.targetMb !== 'number' || !Number.isFinite(a.targetMb) || a.targetMb < 0.1 || a.targetMb > 500) {
+    return false
+  }
+  if (
+    a.maxMb !== undefined &&
+    (typeof a.maxMb !== 'number' || !Number.isFinite(a.maxMb) || a.maxMb < 0.1 || a.maxMb > 500)
+  ) {
     return false
   }
   return true

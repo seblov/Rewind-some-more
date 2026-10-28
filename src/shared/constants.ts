@@ -212,11 +212,13 @@ export const KEYINT_SEC = 2
  *
  * OBS has no byte ceiling on this output (see replay-buffer.ts), so the upper
  * bound is the only thing standing between a user and an unbounded RAM
- * allocation -- it is a deliberate limit, not an arbitrary one. Shared so the
- * main-process validator and the panel's custom-limit field cannot disagree.
+ * allocation -- it is a deliberate limit, not an arbitrary one. Half an hour at
+ * the highest bitrate is several gigabytes, which is as far as the buffer goes.
+ * Shared so the main-process validator and the panel's custom-limit field
+ * cannot disagree.
  */
 export const BUFFER_DURATION_MIN = 5
-export const BUFFER_DURATION_MAX = 600
+export const BUFFER_DURATION_MAX = 30 * 60
 
 /** AMF target usage for ICQ-style QSV. */
 export const QSV_TARGET_USAGE = 4

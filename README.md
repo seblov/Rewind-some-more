@@ -237,11 +237,13 @@ click a clip to open the editor in its own window:
 **Compress** in the same window makes a smaller copy without touching the original.
 Pick **Low**, **Medium** or **High** — each is a fraction of the clip's own bitrate
 (40% / 65% / 90%), so the result is always smaller than the source and the readout
-tells you by how much before you commit. The copy keeps the source resolution and
-lands in `Rewind/Compressed/`, which the library shows as its own source. Encoding
-runs on the GPU when one is available (NVENC, AMF or QSV); if it has to fall back to
-the CPU, **Settings → Encoder → Compression Threads** decides how many threads it may
-use.
+tells you by how much before you commit. **Discord** is a size goal rather than a
+quality: it holds the copy under the free upload limit, targeting 49.9 MB and
+re-encoding lower if the first pass overshoots — a clip that already fits is not
+inflated. The copy keeps the source resolution and lands in `Rewind/Compressed/`,
+which the library shows as its own source. Encoding runs on the GPU when one is
+available (NVENC, AMF or QSV); if it has to fall back to the CPU,
+**Settings → Encoder → Compression Threads** decides how many threads it may use.
 
 The **Copy clip** item in the rail's card menu puts the clip file on the clipboard,
 so it can be pasted straight into a chat.
