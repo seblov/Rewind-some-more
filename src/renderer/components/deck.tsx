@@ -5,7 +5,7 @@ import { motion, useReducedMotion } from 'motion/react'
 import { api } from '../lib/api'
 import { useBackgroundAction } from '../lib/context'
 import { QK, SETTINGS, hotkeysQuery, profilesQuery } from '../lib/queries'
-import { useHeldSeconds } from '../lib/hooks'
+import { useHeldSeconds, useVisible } from '../lib/hooks'
 import { HotkeyChip } from './audio-controls'
 import { SettingSelect } from './controls'
 import { HotkeyDialog } from './record'
@@ -42,25 +42,31 @@ const formatLimit = (seconds: number) =>
  * `stroke-dashoffset` only, so a fill step is a paint of one number per second —
  * never an animation of layout, and never a repaint loop.
  *
+ * The one-second tick lives here rather than in the deck, so a fill step
+ * re-renders the dial and not the actions, the limit chips and the profile row
+ * along with it.
+ *
  * `pulseKey` changes once per save: the ring throws off a single outward ripple,
  * which is the confirmation that the clip landed without a toast covering the
  * clips it just added.
  */
 export function BufferDial({
   active,
-  seconds,
+  startedAt,
   duration,
   busy,
   pulseKey,
   onToggle,
 }: {
   active: boolean
-  seconds: number
+  startedAt: number
   duration: number
   busy: boolean
   pulseKey: number
   onToggle: () => void
 }) {
+  const seconds = useHeldSeconds(active, startedAt, duration)
+  const visible = useVisible()
   const progress = duration > 0 ? Math.min(Math.max(seconds / duration, 0), 1) : 0
   // Windows' "animations off" reaches us as prefers-reduced-motion. The dial still
   // has to say it can be pressed, so nothing here leans on movement alone: the
@@ -99,8 +105,10 @@ export function BufferDial({
 
       {/* At rest the ring breathes, and that is what says "press me" without a
           label. With animation off it rests drawn and visible instead of only
-          mid-breath, because the invitation cannot be the movement itself. */}
-      {!active && !busy ? (
+          mid-breath, because the invitation cannot be the movement itself. The
+          breath is also skipped while the panel is hidden: it is a continuous
+          animation, and there is nobody in the tray to see it. */}
+      {!active && !busy && visible ? (
         <motion.span
           aria-hidden="true"
           className="pointer-events-none absolute inset-0 rounded-full border border-accent/70 transition-colors group-hover:border-accent"
@@ -271,10 +279,6 @@ export function Deck({
     }).then(() => client.invalidateQueries({ queryKey: QK.profiles }))
   }
 
-  // How much footage is recoverable right now, from the one implementation in
-  // lib/hooks.ts, so the dial and the status strip cannot disagree about it.
-  const held = useHeldSeconds(bufferActive, startedAt, duration)
-
   // Manual recording is a different thing from the buffer, and the engine is the
   // only authority on whether it is running.
   const [recording, setRecording] = useState(false)
@@ -364,7 +368,7 @@ export function Deck({
       <div className="flex items-center gap-8">
         <BufferDial
           active={bufferActive}
-          seconds={held}
+          startedAt={startedAt}
           duration={duration}
           busy={bufferBusy}
           pulseKey={pulseKey}

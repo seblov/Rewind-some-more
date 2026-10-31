@@ -155,6 +155,24 @@ export function useProfileEvents(): void {
 }
 
 /**
+ * True while this window is on screen.
+ *
+ * The panel lives hidden in the tray for most of its life, and the renderer is not
+ * throttled in the background (`window.ts` turns that off so the status polls keep
+ * working), so anything on a timer or on an endless animation has to check this
+ * itself or it keeps rendering for nobody.
+ */
+export function useVisible(): boolean {
+  const [visible, setVisible] = useState(() => !document.hidden)
+  useEffect(() => {
+    const update = () => setVisible(!document.hidden)
+    document.addEventListener('visibilitychange', update)
+    return () => document.removeEventListener('visibilitychange', update)
+  }, [])
+  return visible
+}
+
+/**
  * Seconds of footage the buffer is holding, capped at its length.
  *
  * Once the window is full the oldest footage falls out, so the number stops climbing
@@ -163,11 +181,16 @@ export function useProfileEvents(): void {
  */
 export function useHeldSeconds(active: boolean, startedAt: number, duration: number): number {
   const [now, setNow] = useState(() => Date.now())
+  const visible = useVisible()
   useEffect(() => {
-    if (!active) return
+    // Nothing can see the number while the panel is hidden, so the tick stops
+    // instead of re-rendering a hidden window every second. Coming back re-reads
+    // the clock, so the number is right on the first frame the user sees.
+    if (!active || !visible) return
+    setNow(Date.now())
     const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
-  }, [active])
+  }, [active, visible])
   if (!active || !startedAt) return 0
   return Math.min(Math.max(Math.floor((now - startedAt) / 1000), 0), duration)
 }

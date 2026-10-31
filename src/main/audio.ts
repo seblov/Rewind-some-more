@@ -364,7 +364,6 @@ export class AudioMix {
 
   /** Which running apps can actually be captured individually. */
   getApps(): AudioApp[] {
-    const all = listDevices(this.deps.obs())
     const levels = getSetting('appAudioLevels')
     const probes = this.ready ? this.probeAppWindows() : new Map<string, string>()
     const map = new Map<string, AudioApp>()
@@ -660,8 +659,11 @@ export class AudioDeviceChannels {
    */
   private reconcileChannels(): void {
     if (!this.ready || this.channels.size === 0) return
+    // One forced enumeration for the whole pass: it creates and releases a probe
+    // source per device kind, and the answer is the same for every channel here.
+    const devices = listDevices(this.deps.obs(), true)
     for (const id of [...this.channels.keys()]) {
-      const d = listDevices(this.deps.obs(), true).find((x) => x.id === id)
+      const d = devices.find((x) => x.id === id)
       if (!d) continue
       if (this.coveredBy(d)) this.removeChannel(id)
     }

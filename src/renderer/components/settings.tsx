@@ -293,11 +293,17 @@ function AudioChannelEditor({ channel, label }: { channel: AudioChannel; label: 
   const isOutput = channel === 'desktop'
 
   const devicesQuery = useQuery({
-    queryKey: ['audio-devices', channel],
+    // One entry for both editors, not one per channel: the call returns the whole
+    // endpoint inventory whichever channel asks, and enumerating it means creating
+    // and releasing a probe source inside OBS. Two editors polling two keys meant
+    // doing that twice every five seconds.
+    queryKey: ['audio-devices'],
     queryFn: async () => {
       const [devices, channels] = await Promise.all([api.getAudioDevices(), api.getChannelDevices()])
-      if (!devices.success || !channels.success) return { devices: [] as AudioDevice[], bound: 'default' }
-      return { devices: devices.data ?? [], bound: channels.data?.[channel] ?? 'default' }
+      if (!devices.success || !channels.success) {
+        return { devices: [] as AudioDevice[], channels: {} as Record<string, string | undefined> }
+      }
+      return { devices: devices.data ?? [], channels: channels.data ?? {} }
     },
     retry: false,
     // A plugged-in microphone has to appear without reopening Settings. The list was
@@ -332,7 +338,7 @@ function AudioChannelEditor({ channel, label }: { channel: AudioChannel; label: 
   })
 
   const devices = devicesQuery.data?.devices ?? []
-  const bound = devicesQuery.data?.bound ?? 'default'
+  const bound = devicesQuery.data?.channels[channel] ?? 'default'
   const level = levelsQuery.data ?? { volume: 1, muted: false }
   const gain = gainQuery.data ?? MIC_GAIN.DEFAULT
 

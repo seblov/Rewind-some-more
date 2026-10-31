@@ -522,6 +522,7 @@ export function Rail({
               return (
                 <div
                   key={item.id}
+                  data-index={v.index}
                   ref={virtualizer.measureElement}
                   style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${v.start}px)` }}
                 >
