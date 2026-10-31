@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, clipUrl, formatBytes, formatDuration, messageOf } from '../lib/api'
 import { usePreviewAudio } from '../lib/editor-audio'
-import { Button, CenteredSpinner, Dialog, cn } from './ui'
+import { Button, CenteredSpinner, Dialog, ProgressBar, cn } from './ui'
 import {
   canSave,
   cutAt,
@@ -949,6 +949,9 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
                 : 'Cuts on keyframes save as a stream copy.'
             : saveState.error}
         </p>
+        {/* The save runs for as long as ffmpeg needs; without a moving bar the
+            footer and the disabled buttons look like a frozen window. */}
+        {saving ? <ProgressBar label="Saving the clip" className="w-32 shrink-0" /> : null}
         <Button variant="secondary" disabled={!!saving} onClick={close} title="Close the editor (Escape clears the selection first)">
           Close
         </Button>
@@ -1236,9 +1239,7 @@ function ExportSection({
           {running ? (
           <>
             <span className="tabular shrink-0 text-[11px] text-ink-muted">{percent}%</span>
-            <div className="h-1 w-32 shrink-0 overflow-hidden rounded bg-line">
-              <div className="h-full bg-accent transition-[width]" style={{ width: `${percent}%` }} />
-            </div>
+            <ProgressBar percent={percent} label="Export progress" className="w-32 shrink-0" />
             <Button variant="ghost" size="sm" onClick={() => void api.editorExportCancel()}>
               Cancel
             </Button>
