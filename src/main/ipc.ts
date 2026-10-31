@@ -128,7 +128,7 @@ export interface Services {
   openEditorWindow: (clipPath: string) => void
   currentEditorClip: () => { clipPath: string } | null
   closeEditorWindow: () => void
-  saveEditorClip: (req: any) => Promise<string>
+  saveEditorClip: (req: any, onProgress?: (percent: number) => void) => Promise<string>
 }
 
 /** Human names for settings, so restart messages read as English. */
@@ -1498,12 +1498,23 @@ export function registerIpc(s: Services): void {
     }
   })
 
-  handle(IPC.editorSaveClip, async (args: unknown) => {
+  /**
+   * Save (cut) the clip.
+   *
+   * Raw `ipcMain.handle` rather than `handle()` for the same reason as the export
+   * below: progress is pushed to the sender while the job runs, and the wrapper
+   * does not hand the event through.
+   */
+  ipcMain.handle(IPC.editorSaveClip, async (event, args: unknown) => {
     if (!isSaveClipArgs(args)) return fail('Invalid save arguments')
     const resolved = resolveVideo((args as any).clipPath, s, 'editor-save-clip')
     if ('error' in resolved) return resolved
+    const sender = event.sender
+    const onProgress = (percent: number) => {
+      if (!sender.isDestroyed()) sender.send('save-progress', { percent })
+    }
     try {
-      const out = await s.saveEditorClip({ ...(args as any), clipPath: resolved.path })
+      const out = await s.saveEditorClip({ ...(args as any), clipPath: resolved.path }, onProgress)
       s.getMainWindow()?.webContents.send('clip-saved', { clipPath: out })
       log.info(`Editor saved (${(args as any).mode}): ${out}`)
       return ok({ outputPath: out })

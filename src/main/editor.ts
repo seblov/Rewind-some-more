@@ -306,6 +306,8 @@ export interface SaveClipDeps {
   onCopied: (path: string, originalRecordedAt: number, fromPath: string) => void
   onReplaced: (path: string, editedAt: number) => void
   getClipMeta: (p: string) => { recordedAt?: number; source?: string; audioTracks?: string[] } | null
+  /** Fraction of the write that is done, 0..99. */
+  onProgress?: (percent: number) => void
 }
 
 export async function saveClip(req: SaveClipRequest, deps: SaveClipDeps): Promise<string> {
@@ -324,7 +326,13 @@ export async function saveClip(req: SaveClipRequest, deps: SaveClipDeps): Promis
   const recordedAt = meta?.recordedAt ?? Date.now()
 
   try {
-    await writeSequence({ clipPath: req.clipPath, items: req.items, out: temp, volumes: req.trackVolumes })
+    await writeSequence({
+      clipPath: req.clipPath,
+      items: req.items,
+      out: temp,
+      volumes: req.trackVolumes,
+      onProgress: deps.onProgress,
+    })
   } catch (e) {
     if (fs.existsSync(temp)) {
       try {

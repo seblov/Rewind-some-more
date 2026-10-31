@@ -231,6 +231,7 @@ export interface RewindApi {
   on(event: 'update-state', handler: (s: UpdateState) => void): () => void
   on(event: 'hotkey-capture-key', handler: (hotkey: string) => void): () => void
   on(event: 'export-progress', handler: (p: { percent: number }) => void): () => void
+  on(event: 'save-progress', handler: (p: { percent: number }) => void): () => void
   on(event: 'play-notification-sound', handler: () => void): () => void
   on(event: 'profiles-changed', handler: (p: { activeProfile: number }) => void): () => void
   on(event: 'window-state', handler: (s: { maximized: boolean }) => void): () => void

@@ -888,7 +888,7 @@ const services = {
   openEditorWindow: (clipPath: string) => openEditorWindow(clipPath, PRELOAD, RENDERER_DIR),
   currentEditorClip,
   closeEditorWindow,
-  saveEditorClip: (req: any) =>
+  saveEditorClip: (req: any, onProgress?: (percent: number) => void) =>
     saveClip(req, {
       // The saved file is an edited clip like any `-edit` copy: it carries the
       // source's recording time and its track labels, so the library lists it as the
@@ -906,6 +906,7 @@ const services = {
       },
       onReplaced: (p, editedAt) => setClipMeta(p, { edited: true, editedAt }),
       getClipMeta,
+      onProgress,
     }),
 }
 

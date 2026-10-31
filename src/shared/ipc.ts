@@ -171,6 +171,7 @@ export const EVENT_CHANNELS = [
   'auto-detect-switched',
   'hotkey-capture-key',
   'export-progress',
+  'save-progress',
   'play-notification-sound',
   'update-state',
   'profiles-changed',

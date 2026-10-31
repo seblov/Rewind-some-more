@@ -161,8 +161,13 @@ export function runFfmpeg(args: string[], signal?: AbortSignal, onProgress?: (se
 }
 
 /** Convenience wrapper: run ffmpeg writing to `out`, deleting a partial output on failure. */
-export function ffmpegTo(args: string[], out: string, signal?: AbortSignal): Promise<void> {
-  return runFfmpeg([...args, '-y', out], signal).promise.catch((e) => {
+export function ffmpegTo(
+  args: string[],
+  out: string,
+  signal?: AbortSignal,
+  onProgress?: (seconds: number) => void,
+): Promise<void> {
+  return runFfmpeg([...args, '-y', out], signal, onProgress).promise.catch((e) => {
     try {
       fs.rmSync(out, { force: true })
     } catch {

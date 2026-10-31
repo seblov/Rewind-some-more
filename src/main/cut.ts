@@ -70,6 +70,8 @@ export interface WriteSequenceRequest {
    */
   out: string
   volumes?: StreamVolume[]
+  /** Fraction of the write that is done, 0..99, for a bar the user is watching. */
+  onProgress?: (percent: number) => void
 }
 
 export interface WriteSequenceResult {
@@ -467,6 +469,27 @@ export function copiedFramesRunEven(file: string): Promise<boolean> {
   })
 }
 
+/**
+ * Maps one ffmpeg run's decoded seconds onto the slice of the whole write it
+ * covers, and stops just short of 100: the write is finished when it returns,
+ * not when the encoder stops.
+ */
+function sliceReporter(
+  onProgress: WriteSequenceRequest['onProgress'],
+  from: number,
+  to: number,
+  totalSec: number,
+): ((seconds: number) => void) | undefined {
+  if (!onProgress) return undefined
+  return (seconds) => {
+    const fraction = totalSec > 0 ? Math.min(1, Math.max(0, seconds / totalSec)) : 0
+    onProgress(Math.min(99, Math.round(from + fraction * (to - from))))
+  }
+}
+
+/** `-progress` flags: ffmpeg prints `out_time_ms=...` blocks to stdout that runFfmpeg parses. */
+const PROGRESS_ARGS = ['-progress', 'pipe:1', '-nostats']
+
 /** Copies each kept piece to a scratch part, then joins the parts with the concat demuxer. */
 async function concatCopies(
   clipPath: string,
@@ -477,14 +500,27 @@ async function concatCopies(
   clipSec: number,
   audio: PieceAudio | null,
   muxTail: string[],
+  onProgress?: (percent: number) => void,
 ): Promise<boolean> {
   const parts: string[] = []
   let even = true
+  // The pieces are most of the wait; the join is one remux over them.
+  const partSec = kept.reduce((sum, piece) => sum + copyLengthSec(piece, pullbackSec, clipSec), 0)
+  let copiedSec = 0
   for (let i = 0; i < kept.length; i++) {
     const part = path.join(scratchDir, `part-${String(i).padStart(3, '0')}${CUT_EXT}`)
+    const length = copyLengthSec(kept[i], pullbackSec, clipSec)
+    const from = partSec > 0 ? (copiedSec / partSec) * 80 : 0
+    const to = partSec > 0 ? ((copiedSec + length) / partSec) * 80 : 0
     // No `+faststart`: a part is only ever read by the concat demuxer, and moving
     // the moov atom rewrites the whole part for a player that never sees it.
-    await ffmpegTo(copyArgs(clipPath, kept[i], copyLengthSec(kept[i], pullbackSec, clipSec), audio, []), part)
+    await ffmpegTo(
+      [...copyArgs(clipPath, kept[i], length, audio, []), ...PROGRESS_ARGS],
+      part,
+      undefined,
+      sliceReporter(onProgress, from, to, length),
+    )
+    copiedSec += length
     // Only a piece that stops short of the clip's end has a cut at its tail, and
     // only that tail can land on a packet boundary that reorders frames. A piece
     // that runs to the end has nothing to check.
@@ -515,9 +551,12 @@ async function concatCopies(
       '-c:a', 'aac',
       '-b:a', `${AUDIO_KBPS}k`,
       '-t', outputSec.toFixed(3),
+      ...PROGRESS_ARGS,
       ...muxTail,
     ],
     out,
+    undefined,
+    sliceReporter(onProgress, 80, 99, outputSec),
   )
   return even
 }
@@ -577,6 +616,8 @@ export async function writeSequence(req: WriteSequenceRequest): Promise<WriteSeq
     // a second of blocking work if this is done on the calling thread.
     await fs.promises.copyFile(req.clipPath, req.out)
     const bytes = fs.statSync(req.out).size
+    // A file copy reports no bytes moved, so the bar can only say it is done.
+    req.onProgress?.(99)
     log.info(`Kept every frame of ${path.basename(req.clipPath)}: copied the file`)
     return { durationSec: info.durationSec, removedSec: 0, pieces: kept.length, gaps: 0, reencoded: false, bytes }
   }
@@ -619,28 +660,39 @@ export async function writeSequence(req: WriteSequenceRequest): Promise<WriteSeq
     const write = async (encode: boolean, enc: string | null): Promise<boolean> => {
       if (encode) {
         await ffmpegTo(
-          concatFilterArgs(
-            req.clipPath,
-            req.items,
-            probeInfo,
-            volumes,
-            enc,
-            kbps,
-            { width: info.width, height: info.height, fps: info.fps },
-            muxTail,
-          ),
+          [
+            ...concatFilterArgs(
+              req.clipPath,
+              req.items,
+              probeInfo,
+              volumes,
+              enc,
+              kbps,
+              { width: info.width, height: info.height, fps: info.fps },
+              muxTail,
+            ),
+            ...PROGRESS_ARGS,
+          ],
           req.out,
+          undefined,
+          sliceReporter(req.onProgress, 0, 99, shape.duration),
         )
         return true
       }
       if (shape.kept.length === 1) {
         const one = shape.kept[0]
-        await ffmpegTo(copyArgs(req.clipPath, one, copyLengthSec(one, pullbackSec, info.durationSec), audio, muxTail), req.out)
+        const length = copyLengthSec(one, pullbackSec, info.durationSec)
+        await ffmpegTo(
+          [...copyArgs(req.clipPath, one, length, audio, muxTail), ...PROGRESS_ARGS],
+          req.out,
+          undefined,
+          sliceReporter(req.onProgress, 0, 99, length),
+        )
         // A piece that runs to the clip's end has no cut at its tail, so its packets
         // cannot reorder anything: there is nothing for the check to catch.
         return one.endSec >= info.durationSec - 0.02 ? true : copiedFramesRunEven(req.out)
       }
-      return concatCopies(req.clipPath, shape.kept, scratch!, req.out, pullbackSec, info.durationSec, audio, muxTail)
+      return concatCopies(req.clipPath, shape.kept, scratch!, req.out, pullbackSec, info.durationSec, audio, muxTail, req.onProgress)
     }
 
     const even = await write(reencoded, encoder)

@@ -125,6 +125,7 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [saving, setSaving] = useState<{ mode: 'overwrite' | 'copy' } | null>(null)
+  const [savePercent, setSavePercent] = useState(0)
   /** Replacing the source is irreversible, so it asks before writing. */
   const [confirmReplace, setConfirmReplace] = useState(false)
 
@@ -433,6 +434,9 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
     return () => window.clearTimeout(t)
   }, [cutNotice])
 
+  // The encoder's own progress, pushed while a save runs.
+  useEffect(() => api.on('save-progress', (p) => setSavePercent(p.percent)), [])
+
   /*
    * What actually gets written: master x per-track, per stream.
    *
@@ -682,6 +686,7 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
 
   const save = async (mode: 'overwrite' | 'copy') => {
     setSaving({ mode })
+    setSavePercent(0)
     setSaveError(null)
     try {
       const res = await api.editorSaveClip({ clipPath, items, mode, trackVolumes })
@@ -949,9 +954,14 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
                 : 'Cuts on keyframes save as a stream copy.'
             : saveState.error}
         </p>
-        {/* The save runs for as long as ffmpeg needs; without a moving bar the
-            footer and the disabled buttons look like a frozen window. */}
-        {saving ? <ProgressBar label="Saving the clip" className="w-32 shrink-0" /> : null}
+        {/* The encoder reports its own progress; the bar sits where the disabled
+            buttons are so a long save never reads as a frozen window. */}
+        {saving ? (
+          <>
+            <span className="tabular shrink-0 text-[11px] text-ink-muted">{savePercent}%</span>
+            <ProgressBar percent={savePercent} label="Saving the clip" className="w-32 shrink-0" />
+          </>
+        ) : null}
         <Button variant="secondary" disabled={!!saving} onClick={close} title="Close the editor (Escape clears the selection first)">
           Close
         </Button>

@@ -85,34 +85,31 @@ export function CenteredSpinner() {
 }
 
 /**
- * Thin activity bar for work that outlives a click.
- *
- * A `percent` fills it. Without one it slides: an encode has no measured progress
- * to show, and a bar that never moves reads as a frozen window. Track and fill are
- * theme tokens, so each theme draws it in its own accent.
+ * Thin progress bar for work that outlives a click. Track and fill are theme
+ * tokens, so each theme draws it in its own accent.
  */
 export function ProgressBar({
   percent,
   label,
   className,
 }: {
-  percent?: number
+  percent: number
   label?: string
   className?: string
 }) {
-  const known = percent !== undefined && Number.isFinite(percent)
+  const value = Math.min(100, Math.max(0, percent))
   return (
     <div
       role="progressbar"
       aria-label={label}
       aria-valuemin={0}
       aria-valuemax={100}
-      aria-valuenow={known ? Math.round(percent) : undefined}
+      aria-valuenow={Math.round(value)}
       className={cn('h-1 overflow-hidden rounded-full bg-line', className)}
     >
       <div
-        className={cn('h-full rounded-full bg-accent', known ? 'transition-[width]' : 'rewind-slide w-1/3')}
-        style={known ? { width: `${Math.min(100, Math.max(0, percent))}%` } : undefined}
+        className="h-full rounded-full bg-accent transition-[width]"
+        style={{ width: `${value}%` }}
       />
     </div>
   )
