@@ -24,6 +24,8 @@ encoder has got, instead of a bar that only said something was happening.
 - `Rewind-1.8.2-setup.exe.blockmap`, required for in-app updates.
 - `latest.yml`, the Windows update feed. Required for in-app updates.
 - `Rewind-1.8.2-portable.zip`, unpack anywhere and run `Rewind.exe`.
+- `Rewind-1.8.2-amd64.deb`, the Debian package for x86-64. Installs to `/opt/Rewind`.
+- `Rewind-1.8.2-x86_64.AppImage`, the portable Linux build. X11, x86-64.
 
 Linux requires `pactl` (PulseAudio or PipeWire) and `wmctrl`. The Linux build uses
 software x264 encoding and does not use the in-app updater.
