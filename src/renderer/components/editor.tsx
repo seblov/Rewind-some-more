@@ -108,6 +108,13 @@ function rangeLabel(seconds: number): string {
   return seconds < 60 ? `${seconds.toFixed(1)}s` : formatDuration(seconds)
 }
 
+/** A clip's filename without its extension: the part the editor lets the user rename. */
+function baseNameOf(file: string): string {
+  const name = file.split(/[\\/]/).pop() ?? file
+  const dot = name.lastIndexOf('.')
+  return dot > 0 ? name.slice(0, dot) : name
+}
+
 /**
  * The clip editor.
  *
@@ -156,6 +163,23 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
   const [snap, setSnap] = useState(true)
   /** What the timecode box reads while it is being typed in; null when it follows the playhead. */
   const [tcDraft, setTcDraft] = useState<string | null>(null)
+
+  /*
+   * The name the next save writes under.
+   *
+   * Held here rather than renamed on disk while the editor is open: a rename in the
+   * middle of an edit would move the source out from under the preview and every
+   * ffmpeg job that reads it. The save is already the one moment that writes a new
+   * file, so the name rides along with it.
+   */
+  const sourceBase = baseNameOf(clipPath)
+  const ext = (clipPath.split(/[\\/]/).pop() ?? clipPath).slice(sourceBase.length)
+  const [clipName, setClipName] = useState(sourceBase)
+  /** The name being typed; null when the header is not in edit mode. */
+  const [nameDraft, setNameDraft] = useState<string | null>(null)
+  /** Set by Escape, so the blur that follows does not keep the abandoned name. */
+  const renameCancelled = useRef(false)
+  const renamed = clipName !== sourceBase
 
   const [tracks, setTracks] = useState<ClipAudioTrack[]>([])
   const [volumes, setVolumes] = useState<Record<number, number>>({})
@@ -645,11 +669,13 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
     items[0]?.kind !== 'keep' ||
     items[0].srcIn > 0.01 ||
     items[0].srcOut < duration - 0.01
+  // An unsaved name is worth the same warning: nothing has been written under it yet.
+  const dirty = edited || renamed
 
   const close = useCallback(() => {
-    if (edited && !window.confirm('Close without saving the cuts?')) return
+    if (dirty && !window.confirm('Close without saving your changes?')) return
     void api.editorCancel()
-  }, [edited])
+  }, [dirty])
 
   const saveState = canSave(items)
   const gapCount = shape.gaps.length
@@ -689,7 +715,7 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
     setSavePercent(0)
     setSaveError(null)
     try {
-      const res = await api.editorSaveClip({ clipPath, items, mode, trackVolumes })
+      const res = await api.editorSaveClip({ clipPath, items, mode, trackVolumes, name: clipName })
       if (!res.success) {
         setSaveError(res.error || 'Failed to save clip')
         setSaving(null)
@@ -725,11 +751,46 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
     <div className="flex h-full w-full flex-col overflow-hidden bg-canvas text-ink">
       <header className="flex shrink-0 items-center gap-2 border-b border-line/60 px-5 py-3">
         <ScissorsIcon />
-        <h1 className="text-sm font-medium">Edit Clip</h1>
-        <span className="ml-2 truncate text-xs text-ink-muted" title={clipPath}>
-          {clipPath.split(/[\\/]/).pop()}
-          {info && info.fileSize > 0 ? ` · ${formatBytes(info.fileSize)}` : ''}
-        </span>
+        <h1 className="shrink-0 text-sm font-medium">Edit Clip</h1>
+        {nameDraft === null ? (
+          <button
+            type="button"
+            onClick={() => setNameDraft(clipName)}
+            title={`${clipPath} — click to rename`}
+            className="ml-2 min-w-0 truncate rounded px-1 py-0.5 text-left text-xs text-ink-muted hover:bg-raised/60 hover:text-ink"
+          >
+            {clipName}
+            {ext}
+          </button>
+        ) : (
+          <input
+            autoFocus
+            aria-label="Clip name"
+            value={nameDraft}
+            onChange={(e) => setNameDraft(e.target.value)}
+            onBlur={() => {
+              if (renameCancelled.current) {
+                renameCancelled.current = false
+                return
+              }
+              const next = nameDraft.trim()
+              if (next) setClipName(next)
+              setNameDraft(null)
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.currentTarget.blur()
+              } else if (e.key === 'Escape') {
+                renameCancelled.current = true
+                setNameDraft(null)
+              }
+            }}
+            className="ml-2 w-64 min-w-0 rounded border border-accent/60 bg-canvas px-1 py-0.5 text-xs text-ink"
+          />
+        )}
+        {info && info.fileSize > 0 ? (
+          <span className="shrink-0 text-xs text-ink-muted">· {formatBytes(info.fileSize)}</span>
+        ) : null}
       </header>
 
       <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden px-4 py-3">
@@ -1009,8 +1070,17 @@ export function EditorPage({ clipPath }: { clipPath: string }) {
         }
       >
         <p className="text-[13px] text-ink-muted">
-          The edited clip will overwrite <span className="text-ink">{clipPath.split(/[\\/]/).pop()}</span>. The original
-          cannot be recovered.
+          {renamed ? (
+            <>
+              The edited clip will be saved as <span className="text-ink">{clipName}{ext}</span> and{' '}
+              <span className="text-ink">{sourceBase}{ext}</span> will be deleted. The original cannot be recovered.
+            </>
+          ) : (
+            <>
+              The edited clip will overwrite <span className="text-ink">{sourceBase}{ext}</span>. The original cannot
+              be recovered.
+            </>
+          )}
         </p>
       </Dialog>
     </div>
@@ -1510,13 +1580,24 @@ function Timeline({
 
   return (
     <div className="flex flex-col">
-      <div className="relative ml-0.5 mr-0.5 h-4 text-[10px] text-ink-faint" aria-hidden>
+      {/* The ruler shares the lane's width, so a click anywhere on it lands on the
+          same second the lane would. */}
+      <button
+        type="button"
+        // A pointer shortcut, not a keyboard stop: the lane below answers the arrow
+        // keys and Home/End, and a second focusable seek target would only duplicate it.
+        tabIndex={-1}
+        aria-label="Seek in the timeline"
+        title="Click to seek"
+        onClick={(e) => onSeek(Math.min(toSeconds(e.clientX), shape.duration))}
+        className="relative block h-4 w-full cursor-pointer text-left text-[10px] text-ink-faint hover:text-ink-muted"
+      >
         {ticks.map((t) => (
           <span key={t} className="absolute top-0 -translate-x-1/2" style={{ left: `${pct(t, total)}%` }}>
             {formatDuration(t)}
           </span>
         ))}
-      </div>
+      </button>
 
       <div
         ref={laneRef}

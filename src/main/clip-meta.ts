@@ -18,6 +18,22 @@ export function setClipMeta(file: string, patch: Partial<ClipMeta>): void {
 export function getClipMeta(file: string): ClipMeta | null {
   return clipMeta.get('clips')?.[file] ?? null
 }
+
+/**
+ * Drops the record for a path a rename has moved away from.
+ *
+ * Paths are case-insensitive on disk and exact in the store, so the key is matched
+ * the way the library matches one.
+ */
+export function deleteClipMeta(file: string): void {
+  const all = clipMeta.get('clips') ?? {}
+  const lower = file.toLowerCase()
+  const key = Object.keys(all).find((k) => k.toLowerCase() === lower)
+  if (!key) return
+  delete all[key]
+  clipMeta.set('clips', all)
+}
+
 export function setScreenshotMeta(file: string, patch: { capturedAt: number; source?: string }): void {
   const all = screenshotMeta.get('screenshots') ?? {}
   const prev = all[file] ?? { capturedAt: Date.now() }

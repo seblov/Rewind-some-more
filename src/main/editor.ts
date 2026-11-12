@@ -12,6 +12,7 @@ import {
   uniquePath,
 } from './ffmpeg.js'
 import { analyzeAudio, writeSequence, type StreamVolume } from './cut.js'
+import { validateClipName } from './clip-manager.js'
 import { canSave, type Item } from '@shared/cut.js'
 import { devServerUrl } from './window.js'
 
@@ -257,15 +258,15 @@ export async function getTrackPeaks(file: string, stream: number, bucketCount = 
 // Saving
 // ---------------------------------------------------------------------------
 
-/** Pick a non-colliding `name-edit.mp4` (or `-edit-2`, ...) beside the source. */
-function copyTargetPath(dir: string, base: string, ext: string): string {
-  const first = path.join(dir, `${base}-edit${ext}`)
+/** Pick a non-colliding `<stem>.ext` (or `<stem>-2`, ...) beside the source. */
+function freePath(dir: string, stem: string, ext: string): string {
+  const first = path.join(dir, `${stem}${ext}`)
   if (!fs.existsSync(first)) return first
   for (let i = 2; i < 1000; i++) {
-    const candidate = path.join(dir, `${base}-edit-${i}${ext}`)
+    const candidate = path.join(dir, `${stem}-${i}${ext}`)
     if (!fs.existsSync(candidate)) return candidate
   }
-  throw new Error(`Could not find available copy path for "${base}${ext}" (1000 collisions)`)
+  throw new Error(`Could not find available copy path for "${stem}${ext}" (1000 collisions)`)
 }
 
 const RENAME_BACKOFF_MS = [100, 250, 500, 1000, 2000]
@@ -300,11 +301,13 @@ export interface SaveClipRequest {
   items: Item[]
   mode: 'overwrite' | 'copy'
   trackVolumes?: StreamVolume[]
+  /** Base name the written file should take, without extension. Omitted keeps the source's name. */
+  name?: string
 }
 
 export interface SaveClipDeps {
   onCopied: (path: string, originalRecordedAt: number, fromPath: string) => void
-  onReplaced: (path: string, editedAt: number) => void
+  onReplaced: (path: string, editedAt: number, fromPath: string) => void
   getClipMeta: (p: string) => { recordedAt?: number; source?: string; audioTracks?: string[] } | null
   /** Fraction of the write that is done, 0..99. */
   onProgress?: (percent: number) => void
@@ -320,6 +323,22 @@ export async function saveClip(req: SaveClipRequest, deps: SaveClipDeps): Promis
   const dir = path.dirname(req.clipPath)
   const ext = path.extname(req.clipPath)
   const base = path.basename(req.clipPath, ext)
+
+  // A name equal to the source's is not a rename: the file keeps the name it has.
+  let name = req.name?.trim() ?? ''
+  if (name === base) name = ''
+  if (name) {
+    const validated = validateClipName(name)
+    if (!validated.ok) throw new Error(validated.reason)
+    name = validated.name
+    // A replace writes over the clip that was opened, never over a different file:
+    // that would destroy a clip the user did not ask to touch.
+    const target = path.join(dir, `${name}${ext}`)
+    if (req.mode === 'overwrite' && target.toLowerCase() !== req.clipPath.toLowerCase() && fs.existsSync(target)) {
+      throw new Error(`"${name}${ext}" already exists beside this clip`)
+    }
+  }
+
   const temp = path.join(dir, `${base}.trim-${Date.now()}${ext}`)
 
   const meta = deps.getClipMeta(req.clipPath)
@@ -345,7 +364,9 @@ export async function saveClip(req: SaveClipRequest, deps: SaveClipDeps): Promis
   }
 
   if (req.mode === 'copy') {
-    const target = copyTargetPath(dir, base, ext)
+    // A renamed copy takes the asked name; an unnamed one keeps the `-edit` suffix
+    // that marks it as a copy of the clip beside it.
+    const target = freePath(dir, name || `${base}-edit`, ext)
     await renameWithRetry(temp, target)
     log.info(`Saved edited copy: ${target}`)
     deps.onCopied(target, recordedAt, req.clipPath)
@@ -365,8 +386,21 @@ export async function saveClip(req: SaveClipRequest, deps: SaveClipDeps): Promis
     throw new Error(`Failed to replace original clip: ${(e as Error).message}`)
   }
 
-  deps.onReplaced(req.clipPath, Date.now())
-  return req.clipPath
+  // Renaming after the replace keeps the old file's contents until the write has
+  // landed: if the rename fails, the replaced clip is still there under its name.
+  let out = req.clipPath
+  if (name) {
+    const target = path.join(dir, `${name}${ext}`)
+    try {
+      await renameWithRetry(req.clipPath, target)
+      out = target
+    } catch (e) {
+      throw new Error(`Replaced the clip but could not rename it: ${(e as Error).message}`)
+    }
+  }
+
+  deps.onReplaced(out, Date.now(), req.clipPath)
+  return out
 }
 
 // ---------------------------------------------------------------------------

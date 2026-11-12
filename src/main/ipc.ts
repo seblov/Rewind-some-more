@@ -1941,12 +1941,16 @@ function isSaveClipArgs(v: unknown): v is {
   items: { id: number; kind: 'keep'; srcIn: number; srcOut: number }[] | { id: number; kind: 'gap'; durSec: number }[]
   mode: 'overwrite' | 'copy'
   trackVolumes?: { stream: number; volume: number }[]
+  name?: string
 } {
   if (!v || typeof v !== 'object') return false
   const a = v as any
   if (typeof a.clipPath !== 'string' || a.clipPath.length === 0) return false
   if (a.mode !== 'overwrite' && a.mode !== 'copy') return false
   if (!isItemList(a.items)) return false
+  // The name is a base name, and editor.ts validates it against the same rules the
+  // library's rename uses. This only rejects a value of the wrong kind.
+  if (a.name !== undefined && (typeof a.name !== 'string' || a.name.length > 200)) return false
   if (a.trackVolumes === undefined) return true
   return (
     Array.isArray(a.trackVolumes) &&

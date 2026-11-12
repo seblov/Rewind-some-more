@@ -26,7 +26,7 @@ import {
   screenshotPath,
   OBS_STATUS_MESSAGES,
 } from './ipc.js'
-import { getClipMeta, setClipMeta } from './clip-meta.js'
+import { getClipMeta, setClipMeta, deleteClipMeta } from './clip-meta.js'
 import { openEditorWindow, currentEditorClip, closeEditorWindow, cleanupEditor, saveClip } from './editor.js'
 import { getSetting, setSetting } from './store.js'
 import { captureActiveProfileValues, getProfiles, planProfileChange } from './profiles.js'
@@ -904,7 +904,24 @@ const services = {
           editedAt: Date.now(),
         })
       },
-      onReplaced: (p, editedAt) => setClipMeta(p, { edited: true, editedAt }),
+      onReplaced: (p, editedAt, fromPath) => {
+        // A replaced clip keeps its own name unless the editor renamed it. When it
+        // did, the record has to follow the file or the clip loses its recorded
+        // source and track layout the moment it is saved.
+        if (p === fromPath) {
+          setClipMeta(p, { edited: true, editedAt })
+          return
+        }
+        const from = getClipMeta(fromPath)
+        setClipMeta(p, {
+          recordedAt: from?.recordedAt ?? Date.now(),
+          source: from?.source,
+          audioTracks: from?.audioTracks,
+          edited: true,
+          editedAt,
+        })
+        deleteClipMeta(fromPath)
+      },
       getClipMeta,
       onProgress,
     }),

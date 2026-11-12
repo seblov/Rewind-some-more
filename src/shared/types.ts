@@ -232,6 +232,8 @@ export interface SaveClipArgs {
   items: Item[]
   mode: 'overwrite' | 'copy'
   trackVolumes?: { stream: number; volume: number }[]
+  /** Name the saved file should take, without extension. Omitted keeps the source's name. */
+  name?: string
 }
 
 export interface SaveClipResult {
